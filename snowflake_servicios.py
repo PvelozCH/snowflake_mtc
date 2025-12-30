@@ -215,7 +215,7 @@ def insertar_ot(conn_sqlite, cursor, activity_id, sap_work_number):
 
         """, (activity_id, sap_work_number, firma))
 
-        conn_sqlite.commit() # Guardado inmediato
+        conn_sqlite.commit()
 
         print(f"  -> Nueva OT guardada en SQLite: {activity_id} / {sap_work_number}")
 
@@ -235,7 +235,7 @@ def insertar_comentario(conn_sqlite, cursor, datos_comentario):
             COMMENT_DESCRIPTION, LOCATION_URLS, COMMENT_USED_FOR, CREATED_DATE, MD5
         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, datos_comentario)
-    conn_sqlite.commit() # Guardado inmediato
+    conn_sqlite.commit() 
 
 
 def comentario_existe(cursor, comment_id):
@@ -430,7 +430,6 @@ def crear_comentarios_historico(session, query, conn_sqlite):
             
             datos_insercion, _ = preparar_datos_insercion(datos)
             try:
-                # La función de inserción ahora maneja su propio commit
                 insertar_comentario(conn_sqlite, cursor, datos_insercion)
                 
                 cont_nuevos += 1
@@ -472,7 +471,6 @@ def crear_comentarios_temp(session, query, conn_sqlite):
             
             datos_insercion, firma = preparar_datos_insercion(datos)
             try:
-                # La función de inserción ahora maneja su propio commit
                 insertar_comentario(conn_sqlite, cursor, datos_insercion)
                 cont_nuevos_guardados += 1
 
@@ -481,7 +479,6 @@ def crear_comentarios_temp(session, query, conn_sqlite):
                     datos['comment_id']
                 )
                 
-                # La inserción de OT también maneja su propio commit
                 if not ot_existe(cursor, firma):
                     insertar_ot(conn_sqlite, cursor, datos['activity_id'], datos['sap_work_number'])
                 
