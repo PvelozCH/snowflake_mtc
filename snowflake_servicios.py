@@ -180,7 +180,8 @@ def crear_tabla_comentarios(cursor):
         LOCATION_URLS TEXT,
         COMMENT_USED_FOR TEXT,
         CREATED_DATE TEXT,
-        MD5 TEXT
+        MD5 TEXT,
+        status TEXT NOT NULL DEFAULT 'pendiente'
     )
     """)
     print("Se crea tabla de comentarios en sqlite!")
@@ -228,6 +229,41 @@ def ot_existe(cursor, firma):
     """Verifica si una OT ya existe en SQLite por su MD5"""
     cursor.execute("SELECT 1 FROM ot_lista WHERE MD5 = ?", (firma,))
     return cursor.fetchone() is not None
+
+
+# ============================================================================
+# FUNCIONES DE GESTIÓN DE ESTADO
+# ============================================================================
+
+def get_pending_comentarios(conn_sqlite):
+    """Obtiene todos los comentarios con estado 'pendiente' de SQLite."""
+    try:
+        conn_sqlite.row_factory = sqlite3.Row
+        cursor = conn_sqlite.cursor()
+        cursor.execute("SELECT * FROM comentarios WHERE status = 'pendiente'")
+        rows = cursor.fetchall()
+        # Convertir las filas a una lista de diccionarios para facilitar su uso
+        comentarios = [dict(row) for row in rows]
+        print(f"Se encontraron {len(comentarios)} comentarios 'pendientes' para procesar.")
+        return comentarios
+    finally:
+        conn_sqlite.row_factory = None # Restablecer para evitar efectos secundarios
+
+def update_status_exitoso(conn_sqlite, comentarios):
+    """Actualiza el estado de una lista de comentarios a 'exitoso'."""
+    if not comentarios:
+        return
+    
+    # Extraer solo los IDs para la consulta SQL
+    comment_ids = [c['ID'] for c in comentarios]
+    cursor = conn_sqlite.cursor()
+    
+    # Crear placeholders para la consulta de forma segura
+    placeholders = ','.join('?' for _ in comment_ids)
+    query = f"UPDATE comentarios SET status = 'exitoso' WHERE ID IN ({placeholders})"
+    
+    cursor.execute(query, comment_ids)
+    print(f"{cursor.rowcount} comentarios actualizados a 'exitoso'.")
 
 
 # ============================================================================

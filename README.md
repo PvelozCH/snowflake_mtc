@@ -1,57 +1,73 @@
-# Proyecto de Extracción de Datos de Snowflake
+# Ejecución del Proceso de Sincronización
+## Uso General
 
-Este proyecto contiene una serie de scripts de Python para extraer datos de comentarios y órdenes de trabajo desde una instancia de Snowflake, procesarlos y almacenarlos en una base de datos local SQLite. También genera archivos JSON a partir de los datos almacenados.
+El programa se ejecuta desde la línea de comandos de la siguiente manera:
 
-## Descripción General
+```bash
+.\python.exe main.py [parametro]
+```
 
-El flujo de trabajo principal es el siguiente:
+## Parámetros Disponibles
 
-1.  **Conexión**: El script principal (`main.py`) se conecta a Snowflake y a una base de datos local SQLite (`BDD_SNOWFLAKE.db`).
-2.  **Extracción**: Se ejecutan consultas SQL para obtener datos de órdenes de trabajo (OT) y comentarios desde Snowflake.
-3.  **Procesamiento**: Los datos se procesan y se insertan en tablas locales en SQLite. Se utiliza un hash MD5 para identificar registros únicos y evitar duplicados. Las imágenes asociadas a los comentarios se descargan en la carpeta `carpeta_imagenes`.
-4.  **Generación de JSON**: Los scripts pueden generar archivos JSON a partir de los datos almacenados en SQLite para su uso en otros sistemas.
+A continuación se detallan los parámetros válidos y las acciones que ejecuta cada uno.
 
-## Archivos del Proyecto
+---
 
--   `main.py`: El punto de entrada de la aplicación. Orquesta todo el proceso de extracción y procesamiento.
--   `snowflake_servicios.py`: Un módulo de servicio que contiene la lógica principal para interactuar con Snowflake, procesar los datos, descargar imágenes y manejar la base de datos SQLite.
--   `carga_servicios.py`: Contiene funciones para convertir los datos de la base de datos SQLite a formato JSON.
--   `automatic.py`: (Propósito a ser documentado).
--   `BDD_SNOWFLAKE.db`: La base de datos SQLite que se crea para almacenar los datos localmente.
--   `Log.txt`: Un archivo de log que registra los eventos y errores durante la ejecución.
+### `historico`
 
-## Requisitos
+Realiza una carga completa de todos los datos desde Snowflake a la base de datos local.
 
--   Python 3.x
--   Las librerías especificadas en `requirements.txt` (si existe) o las importadas en los scripts (e.g., `snowflake-connector-python`, `snowflake-snowpark-python`, `selenium`).
+**Comando:**
+```bash
+.\python.exe main.py historico
+```
 
-## Cómo Usar
+**Acciones Ejecutadas:**
+1.  **`crear_ot`**: Se conecta a Snowflake y sincroniza la lista de órdenes de trabajo en la base de datos local SQLite.
+2.  **`crear_comentarios(..., "historico")`**: Descarga todos los comentarios y sus imágenes asociadas desde Snowflake. Los comentarios se guardan en SQLite con el estado por defecto `"pendiente"`.
+3.  **`jsonHistorico`**: Genera el archivo `2.comentarios_por_ot_historico.json` a partir de todos los registros en la tabla `comentarios` de SQLite.
+4.  **(Simulación de envío)**: Al final del proceso, se prepara para enviar los datos al endpoint. Si el envío fuese exitoso, se actualizaría el estado de **todos los comentarios** en la base de datos a `"exitoso"`.
 
-El script `main.py` se ejecuta desde la línea de comandos y requiere un parámetro para definir el modo de operación.
+---
 
-### Modos de Ejecución
+### `temp`
 
-1.  **Modo Histórico (`historico`)**:
-    Realiza una carga completa de todos los datos desde Snowflake. Es ideal para la primera ejecución o para una recarga total.
+Realiza una carga incremental de datos. Sincroniza comentarios nuevos que no existen en la base de datos local y, además, procesa todos los comentarios que quedaron en estado `"pendiente"` de ejecuciones anteriores.
 
-    ```bash
-    python main.py historico
-    ```
+**Comando:**
+```bash
+.\python.exe main.py temp
+```
 
-2.  **Modo Temporal/Incremental (`temp`)**:
-    Realiza una carga incremental, procesando únicamente los registros que son nuevos desde la última ejecución.
+**Acciones Ejecutadas:**
+1.  **`crear_comentarios(..., "temp")`**: Se conecta a Snowflake y busca comentarios que no existan en la base de datos local SQLite. Los nuevos que encuentra los guarda con estado `"pendiente"`.
+2.  **`get_pending_comentarios`**: Consulta la base de datos SQLite y obtiene una lista de **todos** los comentarios cuyo estado es `"pendiente"` (esto incluye los recién agregados y los que fallaron en envíos anteriores).
+3.  **`crear_json_temporal`**: Crea un archivo JSON (`comentarios_temp_...json`) que contiene únicamente los comentarios pendientes obtenidos en el paso anterior.
+4.  **(Simulación de envío)**: Se prepara para enviar el JSON temporal y sus imágenes asociadas al endpoint. Si el envío fuese exitoso, se actualizaría el estado de **solo los comentarios enviados** a `"exitoso"`.
 
-    ```bash
-    python main.py temp
-    ```
+---
 
-3.  **Generar JSON Histórico (`jsonhistorico`)**:
-    Omite la conexión con Snowflake y simplemente genera el archivo JSON histórico a partir de los datos ya existentes en la base de datos SQLite.
+### `jsonhistorico`
 
-    ```bash
-    python main.py jsonhistorico
-    ```
+Regenera el archivo `2.comentarios_por_ot_historico.json` utilizando únicamente los datos que ya están en la base de datos local SQLite. **No se conecta a Snowflake.**
 
-## Configuración
+**Comando:**
+```bash
+.\python.exe main.py jsonhistorico
+```
+**Acciones Ejecutadas:**
+1.  **`jsonHistorico`**: Lee la tabla `comentarios` de SQLite y sobrescribe el archivo JSON histórico.
 
-Las credenciales de conexión a Snowflake se encuentran actualmente codificadas en el archivo `main.py`. Para un entorno de producción, se recomienda encarecidamente mover estas credenciales a un método más seguro, como variables de entorno o un archivo de configuración `.env`.
+---
+
+### `enviojsonendpoint`
+
+Es un modo de prueba diseñado para enviar el archivo `2.comentarios_por_ot_historico.json` y las imágenes existentes al endpoint. **No se conecta a Snowflake.**
+
+**Comando:**
+```bash
+.\python.exe main.py enviojsonendpoint
+```
+**Acciones Ejecutadas:**
+1.  **(Simulación de envío)**: Se prepara para enviar los datos históricos al endpoint.
+2.  **(Simulación de actualización)**: Si el envío fuese exitoso, se conectaríá a la base de datos SQLite para actualizar el estado de **todos los comentarios** a `"exitoso"`.

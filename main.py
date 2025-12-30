@@ -3,7 +3,7 @@ import sqlite3
 import os
 from snowflake.snowpark import Session
 
-from snowflake_servicios import crear_ot, crear_comentarios, log, crear_json_temporal
+from snowflake_servicios import crear_ot, crear_comentarios, log, crear_json_temporal, get_pending_comentarios, update_status_exitoso
 from carga_servicios import jsonHistorico, cargaEndpoint, enviar_carpeta_imagenes_memoria, enviar_imagen_json_memoria
 CONEXION_SNOWFLAKE = {
     "WAREHOUSE": "DEFAULT_WAREHOUSE",
@@ -78,60 +78,84 @@ def conectar_sqlite():
 
 def modo_historico(session, conn_sqlite):
     """
-    Modo de carga completa histórica:
-    - Procesa todas las OT
-    - Descarga todos los comentarios e imágenes
-    - Genera JSON histórico
-    - Envía todo al endpoint
+    Modo de carga completa histórica.
+    Guarda todos los comentarios con estado 'pendiente' y luego simula un envío.
     """
     print("--- MODO HISTÓRICO ---")
     
+    # Sincroniza todos los comentarios y los guarda como 'pendiente'
     crear_ot(session, QUERY_OT, conn_sqlite)
     crear_comentarios(session, QUERY_COMENTARIOS, conn_sqlite, "historico")
     jsonHistorico()
     
-    # Carga de comentarios e imagenes a endpoint
-    ''' 
-    cargaEndpoint(JSON_HISTORICO, ENDPOINT)
-
-    # Envía todas las imágenes históricas al endpoint
-    enviar_carpeta_imagenes_memoria(
-        carpeta_imagenes=CARPETA_IMAGENES,
-        tipo="historico",
-        endpoint=ENDPOINT
-    )
-
+    # Envío de comentarios e imagenes por endpoint
     '''
-    
+    try:
+        conn_sqlite.row_factory = sqlite3.Row
+        cursor = conn_sqlite.cursor()
+        cursor.execute("SELECT * FROM comentarios")
+        todos_los_comentarios = [dict(row) for row in cursor.fetchall()]
+        conn_sqlite.row_factory = None
+        
+        print(f"--- Iniciando envío de {len(todos_los_comentarios)} comentarios históricos ---")
+        cargaEndpoint(JSON_HISTORICO, ENDPOINT)
+        enviar_carpeta_imagenes_memoria(CARPETA_IMAGENES, "historico", ENDPOINT)
+        
+        print("--- Envío histórico exitoso, actualizando estado en la base de datos. ---")
+        update_status_exitoso(conn_sqlite, todos_los_comentarios)
+
+    except Exception as e:
+        print(f"--- ERROR DURANTE EL ENVÍO HISTÓRICO: {e}. El estado no se actualizará. ---")
+    '''
+
     conn_sqlite.commit()
     print("--- PROCESO HISTÓRICO COMPLETADO ---")
 
 
 def modo_temp(session, conn_sqlite):
     """
-    Modo de carga incremental con flujo modular y seguro.
-    Fases: 1. Detección/Descarga, 2. Generación JSON, 3. Envío.
+    Modo de carga incremental con estado:
+    1. Sincroniza y guarda nuevos comentarios desde Snowflake (quedan como 'pendiente').
+    2. Obtiene TODOS los comentarios 'pendientes' (nuevos + reintentos).
+    3. Genera un JSON con ellos y lo envía al endpoint.
+    4. Si el envío es exitoso, actualiza su estado a 'exitoso'.
     """
-    print("--- MODO TEMPORAL (MODULAR) ---")
-    
+    print("--- MODO TEMPORAL (CON ESTADO) ---")
+    # Estos se guardan con estado 'pendiente' por defecto.
     crear_ot(session, QUERY_OT, conn_sqlite)
-    nuevos_comentarios = crear_comentarios(session, QUERY_COMENTARIOS, conn_sqlite, "temp")
+    crear_comentarios(session, QUERY_COMENTARIOS, conn_sqlite, "temp")
     
-    if not nuevos_comentarios:
+    comentarios_a_enviar = get_pending_comentarios(conn_sqlite)
+    
+    if not comentarios_a_enviar:
         conn_sqlite.commit()
-        print("--- PROCESO TEMPORAL COMPLETADO: No se encontraron datos nuevos. ---")
+        print("--- PROCESO TEMPORAL COMPLETADO: No hay comentarios pendientes para enviar. ---")
         return
 
-    nombre_json_temp = crear_json_temporal(nuevos_comentarios)
+    nombre_json_temp = crear_json_temporal(comentarios_a_enviar)
     if not nombre_json_temp:
         conn_sqlite.commit()
         print("--- ERROR: No se pudo generar el archivo JSON temporal. ---")
         return
     
-    # print(f"--- Iniciando envío de {len(nuevos_comentarios)} comentarios nuevos al endpoint ---")
-    #cargaEndpoint(nombre_json_temp, ENDPOINT)
-    #enviar_imagenes_nuevas(nuevos_comentarios, CARPETA_IMAGENES, ENDPOINT)
-    
+    # Envío por endpoint
+    '''
+    try:
+        print(f"--- Hay {len(comentarios_a_enviar)} comentarios pendientes para enviar. ---")
+        print("--- Iniciando envío al endpoint... ---")
+        cargaEndpoint(nombre_json_temp, ENDPOINT)
+        enviar_imagenes_nuevas(comentarios_a_enviar, CARPETA_IMAGENES, ENDPOINT)
+        
+        # Si el envío fuera exitoso, se actualiza el estado.
+        print("--- Envío exitoso, actualizando estado en la base de datos. ---")
+        update_status_exitoso(conn_sqlite, comentarios_a_enviar)
+        
+        print("--- Simulación de envío completada (envío real comentado). El estado no se ha modificado. ---")
+
+    except Exception as e:
+        print(f"--- ERROR DURANTE EL ENVÍO: {e}. Los comentarios seguirán como 'pendientes'. ---")
+    '''
+
     conn_sqlite.commit()
     print("--- PROCESO TEMPORAL COMPLETADO ---")
 
@@ -175,41 +199,48 @@ def modo_json_historico(conn_sqlite):
     print("--- GENERACIÓN DE JSON HISTÓRICO COMPLETADA ---")
 
 
-def modo_envio_endpoint():
+# Para enviar al endpoint toda la data historica (parametro de prueba)
+def modo_envio_endpoint(conn_sqlite):
     """
     Modo de prueba: envía datos históricos existentes al endpoint
-    (no consulta bases de datos, solo envía archivos)
+    y actualiza el estado de todos los comentarios a 'exitoso' si no hay error.
     """
     print("--- MODO ENVÍO A ENDPOINT ---")
     
-    cargaEndpoint(JSON_HISTORICO, ENDPOINT)
-    enviar_carpeta_imagenes_memoria(
-        carpeta_imagenes=CARPETA_IMAGENES,
-        tipo="historico",
-        endpoint=ENDPOINT
-    )
-    
+    try:
+        conn_sqlite.row_factory = sqlite3.Row
+        cursor = conn_sqlite.cursor()
+        cursor.execute("SELECT * FROM comentarios")
+        todos_los_comentarios = [dict(row) for row in cursor.fetchall()]
+        conn_sqlite.row_factory = None
+        
+        print("--- Iniciando envío al endpoint... ---")
+        cargaEndpoint(JSON_HISTORICO, ENDPOINT)
+        enviar_carpeta_imagenes_memoria(CARPETA_IMAGENES, "historico", ENDPOINT)
+        
+        print("--- Envío exitoso, actualizando estado en la base de datos. ---")
+        update_status_exitoso(conn_sqlite, todos_los_comentarios)
+        
+        conn_sqlite.commit()
+
+    except Exception as e:
+        print(f"--- ERROR DURANTE EL ENVÍO: {e}. El estado no se actualizará. ---")
+
     print("--- ENVÍO COMPLETADO ---")
 
 
 def main():
-    """Punto de entrada principal del programa"""
-    # Validar que se proporcione un parámetro
     if len(sys.argv) < 2:
-        print("Error: Debe proporcionar un parámetro de ejecución (historico, temp, jsonhistorico).")
+        print("Error: Debe proporcionar un parámetro de ejecución (historico, temp, jsonhistorico, enviojsonendpoint).")
         sys.exit(1)
     
     parametro = sys.argv[1].lower()
-    
-    # Inicializar archivo de log
     log()
     
-    # Variables para las conexiones
     session = None
     conn_sqlite = None
     
     try:
-        # Modos que requieren Snowflake y SQLite
         if parametro in ["historico", "temp"]:
             session = conectar_snowflake()
             conn_sqlite = conectar_sqlite()
@@ -219,25 +250,24 @@ def main():
             else:
                 modo_temp(session, conn_sqlite)
         
-        # Modo que solo requiere SQLite
-        elif parametro == "jsonhistorico":
+        elif parametro in ["jsonhistorico", "enviojsonendpoint"]:
             conn_sqlite = conectar_sqlite()
-            modo_json_historico(conn_sqlite)
-        
-        # Modo que no requiere conexiones (solo envío)
-        elif parametro == "enviojsonendpoint":
-            modo_envio_endpoint()
+            if parametro == "jsonhistorico":
+                modo_json_historico(conn_sqlite)
+            else:
+                modo_envio_endpoint(conn_sqlite)
         
         else:
             print(f"Error: Parámetro '{parametro}' no reconocido.")
             sys.exit(1)
     
     finally:
-        # Cerrar conexiones de forma segura
         if conn_sqlite:
             conn_sqlite.close()
+            print("Conexión a SQLite cerrada.")
         if session:
             session.close()
+            print("Conexión a Snowflake cerrada.")
 
 
 if __name__ == "__main__":
