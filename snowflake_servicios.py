@@ -47,9 +47,18 @@ def generar_md5(*valores):
 
 def descarga_img_selenium(url, contImg, ID):
     """
-    Descarga una imagen desde una URL usando Selenium en modo headless
-    Retorna la ruta del archivo guardado o None si falla
+    Descarga una imagen desde una URL usando Selenium en modo headless.
+    Verifica si la imagen ya existe antes de descargarla.
+    Retorna la ruta del archivo guardado o None si falla.
     """
+    nombre = f"{ID}_{contImg}.jpg"
+    ruta_destino = os.path.join("carpeta_imagenes", nombre)
+
+    # Verificar si la imagen ya existe para no duplicarla
+    if os.path.exists(ruta_destino):
+        print(f"Imagen ya existe, se omite la descarga: {ruta_destino}")
+        return ruta_destino
+
     options = webdriver.EdgeOptions()
     options.add_argument("--headless=new")
     driver = webdriver.Edge(options=options)
@@ -83,9 +92,6 @@ def descarga_img_selenium(url, contImg, ID):
         
         # Decodificar y guardar la imagen
         imagen = base64.b64decode(base64_data)
-        
-        nombre = f"{ID}_{contImg}.jpg"
-        ruta_destino = os.path.join("carpeta_imagenes", nombre)
         
         with open(ruta_destino, "wb") as f:
             f.write(imagen)
@@ -129,46 +135,6 @@ def procesar_imagenes_historico(location_urls, comment_id):
             ruta_img = descarga_img_selenium(url, cont_img, comment_id)
             
             if ruta_img:
-                cont_img += 1
-                contador_imagenes += 1
-    
-    except Exception as e:
-        print("Error procesando imágenes:", e)
-        agregarEnLog("### ERROR ###")
-        agregarEnLog(f"Error procesando: {e}")
-    
-    return contador_imagenes
-
-
-def procesar_imagenes_temp(location_urls, comment_id):
-    """
-    Procesa imágenes en modo TEMPORAL (incremental):
-    - Descarga cada imagen
-    - La envía inmediatamente al endpoint
-    """
-    from carga_servicios import enviar_imagen_json_memoria
-    
-    if not location_urls:
-        return 0
-    
-    contador_imagenes = 0
-    
-    try:
-        urls = ast.literal_eval(location_urls)
-        cont_img = 1
-        
-        for url in urls:
-            if not url:
-                continue
-            
-            ruta_img = descarga_img_selenium(url, cont_img, comment_id)
-            
-            if ruta_img:
-                enviar_imagen_json_memoria(
-                    ruta_imagen=ruta_img,
-                    tipo="temp",
-                    endpoint=ENDPOINT
-                )
                 cont_img += 1
                 contador_imagenes += 1
     
@@ -394,174 +360,95 @@ def crear_ot(session, query_inicio, conn_sqlite):
 def crear_comentarios_historico(session, query, conn_sqlite):
     """
     Procesa comentarios en modo HISTÓRICO:
-    - Obtiene todos los comentarios desde Snowflake
-    - Descarga todas las imágenes localmente
-    - Guarda todo en SQLite
-    - NO envía al endpoint (eso se hace después desde main)
+    - Obtiene todos los comentarios desde Snowflake, los guarda en SQLite y descarga sus imágenes.
     """
     cont_imagenes_total = 0
-    
     try:
-        # Preparar carpeta de imágenes
         os.makedirs("carpeta_imagenes", exist_ok=True)
-        print("Carpeta carpeta_imagenes creada!")
-        
         cursor = conn_sqlite.cursor()
         crear_tabla_comentarios(cursor)
-        
-        # Obtener comentarios desde Snowflake
         comments = session.sql(query)
         rows_comments = comments.collect()
         
-        # Contar totales para el log
-        cont_comments = len(rows_comments)
-        cont_comment_imgs = contar_imagenes_totales(rows_comments)
-        
-        agregarEnLog("### CANTIDAD DE COMENTARIOS E IMAGENES QUE VIENEN EN TOTAL ###")
-        agregarEnLog(f"Cantidad de comentarios: {cont_comments} ; Cantidad de imagenes: {cont_comment_imgs}")
-        
-        # Procesar cada comentario
+        agregarEnLog(f"### MODO HISTORICO: {len(rows_comments)} comentarios recibidos de Snowflake ###")
         cont_nuevos = 0
         for row in rows_comments:
             datos = extraer_datos_comentario(row)
-            
-            # Si ya existe, saltar
             if comentario_existe(cursor, datos['comment_id']):
                 continue
             
-            # Procesar imágenes (solo descarga, no envía)
-            cont_imagenes_total += procesar_imagenes_historico(
-                datos['location_urls'], 
-                datos['comment_id']
-            )
-            
-            # Preparar e insertar en SQLite
             datos_insercion, _ = preparar_datos_insercion(datos)
-            
             try:
                 insertar_comentario(cursor, datos_insercion)
                 cont_nuevos += 1
+                cont_imagenes_total += procesar_imagenes_historico(
+                    datos['location_urls'], 
+                    datos['comment_id']
+                )
             except sqlite3.IntegrityError as e:
                 print(f"Error de integridad al insertar comentario ID={datos['comment_id']}: {e}")
         
-        print(f"Comentarios procesados: {cont_nuevos}")
-        print(f"Imágenes procesadas: {cont_imagenes_total}")
-    
+        print(f"Nuevos comentarios guardados: {cont_nuevos}")
+        print(f"Imágenes descargadas: {cont_imagenes_total}")
+
     except Exception as e:
-        print(f"Error al conectar o ejecutar la consulta: {e}")
-        agregarEnLog("### ERROR ###")
-        agregarEnLog(f"Error procesando: {e}")
-
-
-# ============================================================================
-# FUNCIÓN PRINCIPAL: CREAR COMENTARIOS MODO TEMPORAL
-# ============================================================================
+        print(f"Error en crear_comentarios_historico: {e}")
+        agregarEnLog(f"### ERROR ###\nError en crear_comentarios_historico: {e}")
 
 def crear_comentarios_temp(session, query, conn_sqlite):
     """
-    Procesa comentarios en modo TEMPORAL (incremental):
-    - Obtiene todos los comentarios desde Snowflake
-    - Procesa SOLO los nuevos (que no existen en SQLite)
-    - Descarga imágenes nuevas y las envía inmediatamente al endpoint
-    - Guarda comentarios nuevos en SQLite
-    - Genera y retorna JSON temporal con los nuevos
+    Procesa comentarios en modo TEMPORAL:
+    - Identifica y guarda nuevos comentarios en SQLite.
+    - Descarga localmente las imágenes de los nuevos comentarios.
+    - Retorna una lista con los datos de los comentarios nuevos.
     """
     comentarios_nuevos = []
-    cont_imagenes_total = 0
-    
     try:
-        # Preparar carpeta de imágenes
         os.makedirs("carpeta_imagenes", exist_ok=True)
-        print("Carpeta carpeta_imagenes creada!")
-        
         cursor = conn_sqlite.cursor()
         crear_tabla_comentarios(cursor)
-        
-        # Obtener comentarios desde Snowflake
         comments = session.sql(query)
         rows_comments = comments.collect()
-        
-        # Contar totales para el log
-        cont_comments = len(rows_comments)
-        cont_comment_imgs = contar_imagenes_totales(rows_comments)
-        
-        agregarEnLog("### CANTIDAD DE COMENTARIOS E IMAGENES QUE VIENEN EN TOTAL ###")
-        agregarEnLog(f"Cantidad de comentarios: {cont_comments} ; Cantidad de imagenes: {cont_comment_imgs}")
-        
-        # Procesar cada comentario
-        cont_nuevos = 0
+
         for row in rows_comments:
             datos = extraer_datos_comentario(row)
-            datos_insercion, firma = preparar_datos_insercion(datos)
-            
-            # Si ya existe, saltar (modo incremental)
             if comentario_existe(cursor, datos['comment_id']):
                 continue
             
-            # Procesar imágenes (descarga Y envía al endpoint)
-            cont_imagenes_total += procesar_imagenes_temp(
-                datos['location_urls'], 
-                datos['comment_id']
-            )
-            
-            # Insertar comentario en SQLite
+            datos_insercion, firma = preparar_datos_insercion(datos)
             try:
                 insertar_comentario(cursor, datos_insercion)
-                cont_nuevos += 1
-                
-                # Insertar OT si no existe
+                procesar_imagenes_historico(
+                    datos['location_urls'], 
+                    datos['comment_id']
+                )
                 if not ot_existe(cursor, firma):
                     insertar_ot(cursor, datos['activity_id'], datos['sap_work_number'])
                 
-                # Agregar a la lista para el JSON temporal
                 comentarios_nuevos.append({
-                    "ID": datos['comment_id'],
-                    "ACTIVITY_ID": datos['activity_id'],
-                    "SAP_WORK_NUMBER": datos['sap_work_number'],
-                    "ROLE_NAME": datos['role_name'],
-                    "WORK_SEQUENCE_NAME": datos['work_sequence_name'],
-                    "ELEMENT_STEP": datos['element_step'],
-                    "ELEMENT_INSTANCE_NAME": datos['element_instance_name'],
-                    "SUFFIX": datos['suffix'],
-                    "COMMENT_TITLE": datos['comment_title'],
-                    "COMMENT_DESCRIPTION": datos['comment_description'],
-                    "LOCATION_URLS": datos['location_urls'],
-                    "COMMENT_USED_FOR": datos['comment_used_for'],
-                    "CREATED_DATE": datos['created_date'],
-                    "MD5": firma
+                    "ID": datos['comment_id'], "ACTIVITY_ID": datos['activity_id'],
+                    "SAP_WORK_NUMBER": datos['sap_work_number'], "ROLE_NAME": datos['role_name'],
+                    "WORK_SEQUENCE_NAME": datos['work_sequence_name'], "ELEMENT_STEP": datos['element_step'],
+                    "ELEMENT_INSTANCE_NAME": datos['element_instance_name'], "SUFFIX": datos['suffix'],
+                    "COMMENT_TITLE": datos['comment_title'], "COMMENT_DESCRIPTION": datos['comment_description'],
+                    "LOCATION_URLS": datos['location_urls'], "COMMENT_USED_FOR": datos['comment_used_for'],
+                    "CREATED_DATE": datos['created_date'], "MD5": firma
                 })
-                
-                print(f"Comentario nuevo agregado: ID={datos['comment_id']}")
-                
             except sqlite3.IntegrityError as e:
                 print(f"Error de integridad al insertar comentario ID={datos['comment_id']}: {e}")
         
-        print(f"Comentarios procesados: {cont_nuevos}")
-        print(f"Imágenes procesadas: {cont_imagenes_total}")
-        
-        # Crear JSON temporal si hay comentarios nuevos
-        if comentarios_nuevos:
-            return crear_json_temporal(comentarios_nuevos)
-        else:
-            print("No se encontraron comentarios nuevos en modo temp")
-            return None
-    
+        print(f"Nuevos comentarios guardados: {len(comentarios_nuevos)}")
+        return comentarios_nuevos
     except Exception as e:
-        print(f"Error al conectar o ejecutar la consulta: {e}")
-        agregarEnLog("### ERROR ###")
-        agregarEnLog(f"Error procesando: {e}")
-        return None
-
-
-# ============================================================================
-# DISPATCHER: SELECCIONA MODO HISTÓRICO O TEMPORAL
-# ============================================================================
+        print(f"Error en crear_comentarios_temp: {e}")
+        agregarEnLog(f"### ERROR ###\nError en crear_comentarios_temp: {e}")
+        return []
 
 def crear_comentarios(session, query, conn_sqlite, parametro):
     """
-    Función dispatcher que llama al modo correcto según el parámetro
-    - 'historico': Llama a crear_comentarios_historico()
-    - 'temp': Llama a crear_comentarios_temp() y retorna nombre del JSON
+    Función dispatcher que llama al modo correcto según el parámetro.
+    - 'historico': Carga todo y no devuelve nada.
+    - 'temp': Carga solo lo nuevo y devuelve una lista de los nuevos comentarios.
     """
     if parametro == "historico":
         crear_comentarios_historico(session, query, conn_sqlite)

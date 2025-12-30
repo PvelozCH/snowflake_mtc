@@ -1,9 +1,10 @@
 import sys
 import sqlite3
+import os
 from snowflake.snowpark import Session
 
-from snowflake_servicios import crear_ot, crear_comentarios, log
-from carga_servicios import jsonHistorico, cargaEndpoint, enviar_carpeta_imagenes_memoria
+from snowflake_servicios import crear_ot, crear_comentarios, log, crear_json_temporal
+from carga_servicios import jsonHistorico, cargaEndpoint, enviar_carpeta_imagenes_memoria, enviar_imagen_json_memoria
 CONEXION_SNOWFLAKE = {
     "WAREHOUSE": "DEFAULT_WAREHOUSE",
     "ACCOUNT": "BHP-SYDNEY",
@@ -108,25 +109,58 @@ def modo_historico(session, conn_sqlite):
 
 def modo_temp(session, conn_sqlite):
     """
-    Modo de carga incremental:
-    - Actualiza lista de OT
-    - Procesa solo comentarios nuevos
-    - Descarga y envía imágenes nuevas inmediatamente
-    - Genera y envía JSON temporal con los nuevos
+    Modo de carga incremental con flujo modular y seguro.
+    Fases: 1. Detección/Descarga, 2. Generación JSON, 3. Envío.
     """
-    print("--- MODO TEMPORAL (INCREMENTAL) ---")
+    print("--- MODO TEMPORAL (MODULAR) ---")
     
     crear_ot(session, QUERY_OT, conn_sqlite)
-    nom_json = crear_comentarios(session, QUERY_COMENTARIOS, conn_sqlite, "temp")
+    nuevos_comentarios = crear_comentarios(session, QUERY_COMENTARIOS, conn_sqlite, "temp")
     
-    if nom_json:
-        cargaEndpoint(nom_json, ENDPOINT)
-    else:
-        raise ValueError("No hay comentarios nuevos")
+    if not nuevos_comentarios:
+        conn_sqlite.commit()
+        print("--- PROCESO TEMPORAL COMPLETADO: No se encontraron datos nuevos. ---")
+        return
+
+    nombre_json_temp = crear_json_temporal(nuevos_comentarios)
+    if not nombre_json_temp:
+        conn_sqlite.commit()
+        print("--- ERROR: No se pudo generar el archivo JSON temporal. ---")
+        return
+    
+    # print(f"--- Iniciando envío de {len(nuevos_comentarios)} comentarios nuevos al endpoint ---")
+    #cargaEndpoint(nombre_json_temp, ENDPOINT)
+    #enviar_imagenes_nuevas(nuevos_comentarios, CARPETA_IMAGENES, ENDPOINT)
     
     conn_sqlite.commit()
     print("--- PROCESO TEMPORAL COMPLETADO ---")
 
+
+def enviar_imagenes_nuevas(nuevos_comentarios, carpeta_imagenes, endpoint):
+    """
+    Recorre la lista de comentarios nuevos y envía solo las imágenes asociadas.
+    """
+    print(f"Buscando imágenes para {len(nuevos_comentarios)} comentarios nuevos...")
+    for comentario in nuevos_comentarios:
+        comment_id = comentario.get('ID')
+        if not comment_id:
+            continue
+
+        # Asumir un número máximo de imágenes por comentario para buscar (e.g., 20)
+        for i in range(1, 21):
+            nombre_img = f"{comment_id}_{i}.jpg"
+            ruta_img = os.path.join(carpeta_imagenes, nombre_img)
+            
+            if os.path.exists(ruta_img):
+                print(f"Enviando imagen encontrada: {ruta_img}")
+                enviar_imagen_json_memoria(
+                    ruta_imagen=ruta_img,
+                    tipo="temp",
+                    endpoint=endpoint
+                )
+            else:
+                # Si no se encuentra la imagen N, se asume que no hay N+1 y se detiene la búsqueda
+                break
 
 def modo_json_historico(conn_sqlite):
     """
