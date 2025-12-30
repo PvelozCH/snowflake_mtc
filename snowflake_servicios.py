@@ -132,6 +132,7 @@ def procesar_imagenes_historico(location_urls, comment_id):
             if not url:
                 continue
             
+            print(f"    -> Descargando imagen {cont_img} para comentario {comment_id}...")
             ruta_img = descarga_img_selenium(url, cont_img, comment_id)
             
             if ruta_img:
@@ -139,9 +140,8 @@ def procesar_imagenes_historico(location_urls, comment_id):
                 contador_imagenes += 1
     
     except Exception as e:
-        print("Error procesando imágenes:", e)
-        agregarEnLog("### ERROR ###")
-        agregarEnLog(f"Error procesando: {e}")
+        print(f"Error procesando imágenes para comentario {comment_id}: {e}")
+        agregarEnLog(f"### ERROR ###\nError procesando imágenes para comentario {comment_id}: {e}")
     
     return contador_imagenes
 
@@ -191,25 +191,43 @@ def crear_tabla_comentarios(cursor):
 # FUNCIONES DE INSERCIÓN Y CONSULTA EN SQLITE
 # ============================================================================
 
-def insertar_ot(cursor, activity_id, sap_work_number):
+def insertar_ot(conn_sqlite, cursor, activity_id, sap_work_number):
+
     """
-    Inserta una orden de trabajo en SQLite
-    Retorna True si se insertó, False si ya existía (por MD5 duplicado)
+
+    Inserta una orden de trabajo en SQLite y guarda el cambio inmediatamente.
+
+    Retorna True si se insertó, False si ya existía (por MD5 duplicado).
+
     """
+
     firma = generar_md5(activity_id, sap_work_number)
+
     
+
     try:
+
         cursor.execute("""
+
             INSERT INTO ot_lista(ACTIVITY_ID, SAP_WORK_NUMBER, MD5) 
+
             VALUES (?,?,?)
+
         """, (activity_id, sap_work_number, firma))
+
+        conn_sqlite.commit() # Guardado inmediato
+
+        print(f"  -> Nueva OT guardada en SQLite: {activity_id} / {sap_work_number}")
+
         return True
+
     except sqlite3.IntegrityError:
+
         return False
 
 
-def insertar_comentario(cursor, datos_comentario):
-    """Inserta un comentario completo en SQLite"""
+def insertar_comentario(conn_sqlite, cursor, datos_comentario):
+    """Inserta un comentario completo en SQLite y guarda el cambio inmediatamente."""
     cursor.execute("""
         INSERT INTO comentarios(
             ID, ACTIVITY_ID, SAP_WORK_NUMBER, ROLE_NAME, WORK_SEQUENCE_NAME,
@@ -217,6 +235,7 @@ def insertar_comentario(cursor, datos_comentario):
             COMMENT_DESCRIPTION, LOCATION_URLS, COMMENT_USED_FOR, CREATED_DATE, MD5
         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, datos_comentario)
+    conn_sqlite.commit() # Guardado inmediato
 
 
 def comentario_existe(cursor, comment_id):
@@ -254,16 +273,16 @@ def update_status_exitoso(conn_sqlite, comentarios):
     if not comentarios:
         return
     
-    # Extraer solo los IDs para la consulta SQL
     comment_ids = [c['ID'] for c in comentarios]
+    print(f"Actualizando estado a 'exitoso' para {len(comment_ids)} comentarios...")
+    
     cursor = conn_sqlite.cursor()
     
-    # Crear placeholders para la consulta de forma segura
     placeholders = ','.join('?' for _ in comment_ids)
     query = f"UPDATE comentarios SET status = 'exitoso' WHERE ID IN ({placeholders})"
     
     cursor.execute(query, comment_ids)
-    print(f"{cursor.rowcount} comentarios actualizados a 'exitoso'.")
+    print(f"  -> {cursor.rowcount} comentarios actualizados exitosamente.")
 
 
 # ============================================================================
@@ -360,33 +379,29 @@ def contar_imagenes_totales(rows_comments):
 def crear_ot(session, query_inicio, conn_sqlite):
     """
     Obtiene las órdenes de trabajo desde Snowflake y las guarda en SQLite
-    Evita duplicados usando hash MD5
+    Evita duplicados usando hash MD5 y guarda cada una individualmente.
     """
     try:
         cursor = conn_sqlite.cursor()
         crear_tabla_ot(cursor)
         
-        # Ejecutar query en Snowflake
         ot = session.sql(query_inicio)
         rows = ot.collect()
-        print("Se hace consulta de lista de ot a snowflake")
+        print(f"### OBTENIENDO OTs: {len(rows)} OTs recibidas de Snowflake ###")
         
-        # Insertar OT en SQLite
         cont = 0
         for row in rows:
             ac_id = row["ACTIVITY_ID"]
             swn = row["SAP_WORK_NUMBER"]
             
-            if insertar_ot(cursor, ac_id, swn):
+            if insertar_ot(conn_sqlite, cursor, ac_id, swn):
                 cont += 1
         
-        print("Se guardaron las ot exitosamente en sqlite!")
-        print("Cantidad de ot:", cont)
+        print(f"Total de OTs nuevas guardadas en esta ejecución: {cont}")
     
     except Exception as e:
-        print(f"Error al conectar o ejecutar la consulta: {e}")
-        agregarEnLog("### ERROR ###")
-        agregarEnLog(f"Error procesando: {e}")
+        print(f"Error al conectar o ejecutar la consulta en crear_ot: {e}")
+        agregarEnLog(f"### ERROR ###\nError en crear_ot: {e}")
 
 
 # ============================================================================
@@ -406,7 +421,7 @@ def crear_comentarios_historico(session, query, conn_sqlite):
         comments = session.sql(query)
         rows_comments = comments.collect()
         
-        agregarEnLog(f"### MODO HISTORICO: {len(rows_comments)} comentarios recibidos de Snowflake ###")
+        print(f"### MODO HISTORICO: {len(rows_comments)} comentarios recibidos de Snowflake ###")
         cont_nuevos = 0
         for row in rows_comments:
             datos = extraer_datos_comentario(row)
@@ -415,7 +430,9 @@ def crear_comentarios_historico(session, query, conn_sqlite):
             
             datos_insercion, _ = preparar_datos_insercion(datos)
             try:
-                insertar_comentario(cursor, datos_insercion)
+                # La función de inserción ahora maneja su propio commit
+                insertar_comentario(conn_sqlite, cursor, datos_insercion)
+                
                 cont_nuevos += 1
                 cont_imagenes_total += procesar_imagenes_historico(
                     datos['location_urls'], 
@@ -424,8 +441,8 @@ def crear_comentarios_historico(session, query, conn_sqlite):
             except sqlite3.IntegrityError as e:
                 print(f"Error de integridad al insertar comentario ID={datos['comment_id']}: {e}")
         
-        print(f"Nuevos comentarios guardados: {cont_nuevos}")
-        print(f"Imágenes descargadas: {cont_imagenes_total}")
+        print(f"Total de comentarios nuevos guardados en esta ejecución: {cont_nuevos}")
+        print(f"Total de imágenes descargadas en esta ejecución: {cont_imagenes_total}")
 
     except Exception as e:
         print(f"Error en crear_comentarios_historico: {e}")
@@ -439,12 +456,14 @@ def crear_comentarios_temp(session, query, conn_sqlite):
     - Retorna una lista con los datos de los comentarios nuevos.
     """
     comentarios_nuevos = []
+    cont_nuevos_guardados = 0
     try:
         os.makedirs("carpeta_imagenes", exist_ok=True)
         cursor = conn_sqlite.cursor()
         crear_tabla_comentarios(cursor)
         comments = session.sql(query)
         rows_comments = comments.collect()
+        print(f"### MODO TEMP: {len(rows_comments)} comentarios recibidos de Snowflake ###")
 
         for row in rows_comments:
             datos = extraer_datos_comentario(row)
@@ -453,13 +472,18 @@ def crear_comentarios_temp(session, query, conn_sqlite):
             
             datos_insercion, firma = preparar_datos_insercion(datos)
             try:
-                insertar_comentario(cursor, datos_insercion)
+                # La función de inserción ahora maneja su propio commit
+                insertar_comentario(conn_sqlite, cursor, datos_insercion)
+                cont_nuevos_guardados += 1
+
                 procesar_imagenes_historico(
                     datos['location_urls'], 
                     datos['comment_id']
                 )
+                
+                # La inserción de OT también maneja su propio commit
                 if not ot_existe(cursor, firma):
-                    insertar_ot(cursor, datos['activity_id'], datos['sap_work_number'])
+                    insertar_ot(conn_sqlite, cursor, datos['activity_id'], datos['sap_work_number'])
                 
                 comentarios_nuevos.append({
                     "ID": datos['comment_id'], "ACTIVITY_ID": datos['activity_id'],
@@ -473,7 +497,9 @@ def crear_comentarios_temp(session, query, conn_sqlite):
             except sqlite3.IntegrityError as e:
                 print(f"Error de integridad al insertar comentario ID={datos['comment_id']}: {e}")
         
-        print(f"Nuevos comentarios guardados: {len(comentarios_nuevos)}")
+        if cont_nuevos_guardados > 0:
+            print(f"Total de comentarios nuevos guardados en esta ejecución: {cont_nuevos_guardados}")
+
         return comentarios_nuevos
     except Exception as e:
         print(f"Error en crear_comentarios_temp: {e}")

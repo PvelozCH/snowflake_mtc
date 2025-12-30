@@ -88,7 +88,7 @@ def modo_historico(session, conn_sqlite):
     crear_comentarios(session, QUERY_COMENTARIOS, conn_sqlite, "historico")
     jsonHistorico()
     
-    # Envío de comentarios e imagenes por endpoint
+    # Envío de comentarios por endpoint
     '''
     try:
         conn_sqlite.row_factory = sqlite3.Row
