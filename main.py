@@ -1,134 +1,276 @@
-# -*- coding: utf-8 -*-
-"""
-Punto de entrada principal para el proceso de extracción de datos de Snowflake.
-
-Este script se conecta a Snowflake, ejecuta consultas para obtener órdenes de trabajo (OT) y sus comentarios,
-y procesa estos datos para almacenarlos en una base de datos SQLite local.
-Finalmente, puede generar archivos JSON a partir de los datos locales.
-
-El comportamiento del script se controla mediante un parámetro de línea de comandos:
-- 'historico': Realiza una carga completa. Procesa todas las OT y comentarios desde Snowflake,
-  los guarda en SQLite y genera un archivo JSON con todos los datos históricos.
-- 'temp': Realiza una carga incremental. Compara los datos de Snowflake con los existentes en SQLite
-  y procesa solo los comentarios nuevos, generando un JSON temporal para ellos.
-- 'jsonhistorico': Omite la extracción de Snowflake y genera el JSON histórico a partir de los
-  datos que ya se encuentran en la base de datos SQLite.
-"""
-
-import os
-from dotenv import load_dotenv
-import snowflake.connector
-from snowflake.snowpark import Session
-import json, sys
-from datetime import datetime, date
+import sys
 import sqlite3
-import requests
+import os
+from snowflake.snowpark import Session
 
-from snowflake_servicios import crear_ot, crear_comentarios, log, agregarEnLog
-from carga_servicios import jsonOt, jsonHistorico, jsonTemp
+from snowflake_servicios import crear_ot, crear_comentarios, log, crear_json_temporal, get_pending_comentarios, update_status_exitoso
+from carga_servicios import jsonHistorico, cargaEndpoint, enviar_carpeta_imagenes_memoria, enviar_imagen_json_memoria
+CONEXION_SNOWFLAKE = {
+    "WAREHOUSE": "DEFAULT_WAREHOUSE",
+    "ACCOUNT": "BHP-SYDNEY",
+    "USER": "NICOLAS.JIMENEZ1@BHP.COM",
+    "AUTHENTICATOR": "externalbrowser",
+    "ROLE": "SNOWFLAKE_READER_PROD",
+    "DATABASE": "GLOBAL_PROD",
+    "SCHEMA": "QA_DU_STANDARDISED_WORK_MINAM"
+}
 
-try:
-    # --- 1. CONFIGURACIÓN Y CONEXIONES ---
-    
-    # Define los parámetros de conexión para Snowflake.
-    # Se recomienda externalizar estas credenciales en un futuro (p. ej., usando variables de entorno con .env).
-    conn2 = {
-        "WAREHOUSE": "DEFAULT_WAREHOUSE",
-        "ACCOUNT": "BHP-SYDNEY",
-        "USER": "NICOLAS.JIMENEZ1@BHP.COM",
-        "AUTHENTICATOR": "externalbrowser",
-        "ROLE": "SNOWFLAKE_READER_PROD",
-        "DATABASE": "GLOBAL_PROD",
-        "SCHEMA": "QA_DU_STANDARDISED_WORK_MINAM"
-    }
-    # Crea la sesión de Snowpark
-    session = Session.builder.configs(conn2).create()
-    print("Se conectó a SnowFlake!")
+# Configuración de archivos y rutas
+DB_SQLITE = "BDD_SNOWFLAKE.db"
+ENDPOINT = "http://localhost:8000/recibir-json"
+JSON_HISTORICO = "2.comentarios_por_ot_historico.json"
+CARPETA_IMAGENES = "carpeta_imagenes"
 
-    # Conecta a la base de datos local SQLite
-    connSqlite = sqlite3.connect("BDD_SNOWFLAKE.db")
-    print("Se conectó a sqlite!")
+# Query para obtener lista de órdenes de trabajo
+QUERY_OT = """
+    SELECT DISTINCT activity_id, sap_work_number 
+    FROM sw_temp_maintainer_comments 
+    WHERE activity_mwc = 'SN16'
+"""
 
-    # --- 2. DEFINICIÓN DE QUERIES ---
-
-    # Query para obtener la lista única de órdenes de trabajo (OT).
-    queryInicio = "SELECT DISTINCT activity_id, sap_work_number FROM sw_temp_maintainer_comments WHERE activity_mwc = 'SN16'"
-
-    # Query completa para obtener los detalles de los comentarios, uniéndolos con información adicional.
-    query = f'''
-        WITH TodasLasOT AS (
-            -- Primero, obtenemos una lista de todas las OT relevantes
-            SELECT DISTINCT activity_id, sap_work_number
-            FROM sw_temp_maintainer_comments
-            WHERE activity_mwc = 'SN16'
-        ),
-        ComentariosPorOT AS (
-            -- Luego, obtenemos los comentarios y los unimos con detalles del elemento
-            SELECT 
-                a.id, a.activity_id, a.sap_work_number, b.role_name, b.work_sequence_name,
-                b.element_step, a.element_instance_name, a.suffix, a.comment_title,
-                a.comment_description, a.location_urls, a.comment_used_for, a.created_date
-            FROM sw_temp_maintainer_comments AS a
-            LEFT JOIN sw_element_instance AS b ON a.element_instance_id = b.id
-            WHERE a.comment_used_for IN ('Notification', 'Report')
-        )
-        -- Finalmente, filtramos los comentarios para asegurarnos de que pertenecen a las OT que nos interesan
+# Query para obtener comentarios con sus detalles
+QUERY_COMENTARIOS = f"""
+    WITH TodasLasOT AS (
+        SELECT DISTINCT activity_id, sap_work_number
+        FROM sw_temp_maintainer_comments
+        WHERE activity_mwc = 'SN16'
+    ),
+    ComentariosPorOT AS (
         SELECT 
-            c.id, t.activity_id, t.sap_work_number, c.role_name, c.work_sequence_name,
-            c.element_step, c.element_instance_name, c.suffix, c.comment_title,
-            c.comment_description, c.location_urls, c.comment_used_for, c.created_date
-        FROM ComentariosPorOT AS c
-        INNER JOIN TodasLasOT AS t ON c.activity_id = t.activity_id AND c.sap_work_number = t.sap_work_number
-        ORDER BY t.sap_work_number, c.id;
+            a.id, a.activity_id, a.sap_work_number, b.role_name, b.work_sequence_name,
+            b.element_step, a.element_instance_name, a.suffix, a.comment_title,
+            a.comment_description, a.location_urls, a.comment_used_for, a.created_date,
+            a.activity_name
+        FROM sw_temp_maintainer_comments AS a
+        LEFT JOIN sw_element_instance AS b ON a.element_instance_id = b.id
+        WHERE a.comment_used_for IN ('Notification', 'Report')
+    )
+    SELECT 
+        c.id, t.activity_id, t.sap_work_number, c.role_name, c.work_sequence_name,
+        c.element_step, c.element_instance_name, c.suffix, c.comment_title,
+        c.comment_description, c.location_urls, c.comment_used_for, c.created_date,
+        c.activity_name
+    FROM ComentariosPorOT AS c
+    INNER JOIN TodasLasOT AS t ON c.activity_id = t.activity_id AND c.sap_work_number = t.sap_work_number
+    ORDER BY t.sap_work_number, c.id;
+"""
+
+
+def conectar_snowflake():
+    """Establece y retorna la conexión con Snowflake"""
+    try:
+        session = Session.builder.configs(CONEXION_SNOWFLAKE).create()
+        print("Se conectó a SnowFlake!")
+        return session
+    except Exception as e:
+        print(f"Error al conectar a Snowflake: {e}")
+        sys.exit(1)
+
+
+def conectar_sqlite():
+    """Establece y retorna la conexión con SQLite"""
+    try:
+        conn = sqlite3.connect(DB_SQLITE)
+        print("Se conectó a sqlite!")
+        return conn
+    except Exception as e:
+        print(f"Error al conectar a SQLite: {e}")
+        sys.exit(1)
+
+
+def modo_historico(session, conn_sqlite):
+    """
+    Modo de carga completa histórica.
+    Guarda todos los comentarios con estado 'pendiente' y luego simula un envío.
+    """
+    print("--- MODO HISTÓRICO ---")
+    
+    # Sincroniza todos los comentarios y los guarda como 'pendiente'
+    crear_ot(session, QUERY_OT, conn_sqlite)
+    crear_comentarios(session, QUERY_COMENTARIOS, conn_sqlite, "historico")
+    jsonHistorico()
+    
+    # Envío de comentarios por endpoint
+    '''
+    try:
+        conn_sqlite.row_factory = sqlite3.Row
+        cursor = conn_sqlite.cursor()
+        cursor.execute("SELECT * FROM comentarios")
+        todos_los_comentarios = [dict(row) for row in cursor.fetchall()]
+        conn_sqlite.row_factory = None
+        
+        print(f"--- Iniciando envío de {len(todos_los_comentarios)} comentarios históricos ---")
+        cargaEndpoint(JSON_HISTORICO, ENDPOINT)
+        enviar_carpeta_imagenes_memoria(CARPETA_IMAGENES, "historico", ENDPOINT)
+        
+        print("--- Envío histórico exitoso, actualizando estado en la base de datos. ---")
+        update_status_exitoso(conn_sqlite, todos_los_comentarios)
+
+    except Exception as e:
+        print(f"--- ERROR DURANTE EL ENVÍO HISTÓRICO: {e}. El estado no se actualizará. ---")
     '''
 
-except Exception as e:
-    print(f"Error al conectar o ejecutar la consulta inicial: {e}")
-    # Si hay un error en la conexión o preparación, se detiene la ejecución.
-    sys.exit(1)
-
-
-# --- 3. LÓGICA DE EJECUCIÓN PRINCIPAL ---
-
-# Lee el primer argumento de la línea de comandos para determinar el modo de ejecución.
-if len(sys.argv) < 2:
-    print("Error: Debe proporcionar un parámetro de ejecución (historico, temp, jsonhistorico).")
-    sys.exit(1)
-    
-parametro = sys.argv[1].lower()
-
-# Inicializa el archivo de log para la ejecución actual
-log()
-
-if parametro == "historico":
-    print("--- MODO HISTÓRICO ---")
-    # Procesa la lista de OT y luego todos los comentarios desde Snowflake
-    crear_ot(session, queryInicio, connSqlite)
-    crear_comentarios(session, query, connSqlite, parametro) 
-    # Genera el archivo JSON con todos los datos históricos de la BDD local
-    jsonHistorico()
-    connSqlite.commit()
-    connSqlite.close()
+    conn_sqlite.commit()
     print("--- PROCESO HISTÓRICO COMPLETADO ---")
 
-elif parametro == "temp":
-    print("--- MODO TEMPORAL (INCREMENTAL) ---")
-    # Procesa la lista de OT para tener una referencia actualizada
-    crear_ot(session, queryInicio, connSqlite) 
-    # Procesa solo los comentarios nuevos y genera un JSON temporal para ellos
-    crear_comentarios(session, query, connSqlite, parametro)
-    connSqlite.commit()
-    connSqlite.close()
-    print("--- PROCESO TEMPORAL COMPLETADO ---")
+
+def modo_temp(session, conn_sqlite):
+    """
+    Modo de carga incremental con estado:
+    1. Sincroniza y guarda nuevos comentarios desde Snowflake (quedan como 'pendiente').
+    2. Obtiene TODOS los comentarios 'pendientes' (nuevos + reintentos).
+    3. Genera un JSON con ellos y lo envía al endpoint.
+    4. Si el envío es exitoso, actualiza su estado a 'exitoso'.
+    """
+    print("--- MODO TEMPORAL (CON ESTADO) ---")
+    # Estos se guardan con estado 'pendiente' por defecto.
+    crear_ot(session, QUERY_OT, conn_sqlite)
+    crear_comentarios(session, QUERY_COMENTARIOS, conn_sqlite, "temp")
     
-elif parametro == "jsonhistorico":
+    comentarios_a_enviar = get_pending_comentarios(conn_sqlite)
+    
+    if not comentarios_a_enviar:
+        conn_sqlite.commit()
+        print("--- PROCESO TEMPORAL COMPLETADO: No hay comentarios pendientes para enviar. ---")
+        return
+
+    nombre_json_temp = crear_json_temporal(comentarios_a_enviar)
+    if not nombre_json_temp:
+        conn_sqlite.commit()
+        print("--- ERROR: No se pudo generar el archivo JSON temporal. ---")
+        return
+    
+    # Envío por endpoint
+    '''
+    try:
+        print(f"--- Hay {len(comentarios_a_enviar)} comentarios pendientes para enviar. ---")
+        print("--- Iniciando envío al endpoint... ---")
+        cargaEndpoint(nombre_json_temp, ENDPOINT)
+        enviar_imagenes_nuevas(comentarios_a_enviar, CARPETA_IMAGENES, ENDPOINT)
+        
+        # Si el envío fuera exitoso, se actualiza el estado.
+        print("--- Envío exitoso, actualizando estado en la base de datos. ---")
+        update_status_exitoso(conn_sqlite, comentarios_a_enviar)
+        
+        print("--- Simulación de envío completada (envío real comentado). El estado no se ha modificado. ---")
+
+    except Exception as e:
+        print(f"--- ERROR DURANTE EL ENVÍO: {e}. Los comentarios seguirán como 'pendientes'. ---")
+    '''
+
+    conn_sqlite.commit()
+    print("--- PROCESO TEMPORAL COMPLETADO ---")
+
+
+def enviar_imagenes_nuevas(nuevos_comentarios, carpeta_imagenes, endpoint):
+    """
+    Recorre la lista de comentarios nuevos y envía solo las imágenes asociadas.
+    """
+    print(f"Buscando imágenes para {len(nuevos_comentarios)} comentarios nuevos...")
+    for comentario in nuevos_comentarios:
+        comment_id = comentario.get('ID')
+        if not comment_id:
+            continue
+
+        # Asumir un número máximo de imágenes por comentario para buscar (e.g., 20)
+        for i in range(1, 21):
+            nombre_img = f"{comment_id}_{i}.jpg"
+            ruta_img = os.path.join(carpeta_imagenes, nombre_img)
+            
+            if os.path.exists(ruta_img):
+                print(f"Enviando imagen encontrada: {ruta_img}")
+                enviar_imagen_json_memoria(
+                    ruta_imagen=ruta_img,
+                    tipo="temp",
+                    endpoint=endpoint
+                )
+            else:
+                # Si no se encuentra la imagen N, se asume que no hay N+1 y se detiene la búsqueda
+                break
+
+def modo_json_historico(conn_sqlite):
+    """
+    Genera JSON histórico desde la base de datos local
+    (no consulta Snowflake, solo lee de SQLite)
+    """
     print("--- MODO GENERAR JSON HISTÓRICO ---")
-    # Genera el JSON histórico a partir de los datos ya existentes en SQLite
+    
     jsonHistorico()
-    connSqlite.commit()
-    connSqlite.close()
+    conn_sqlite.commit()
+    
     print("--- GENERACIÓN DE JSON HISTÓRICO COMPLETADA ---")
 
-else:
-    print(f"Error: Parámetro '{parametro}' no reconocido.")
-    print("Los parámetros válidos son: historico, temp, jsonhistorico.")
+
+# Para enviar al endpoint toda la data historica (parametro de prueba)
+def modo_envio_endpoint(conn_sqlite):
+    """
+    Modo de prueba: envía datos históricos existentes al endpoint
+    y actualiza el estado de todos los comentarios a 'exitoso' si no hay error.
+    """
+    print("--- MODO ENVÍO A ENDPOINT ---")
+    
+    try:
+        conn_sqlite.row_factory = sqlite3.Row
+        cursor = conn_sqlite.cursor()
+        cursor.execute("SELECT * FROM comentarios")
+        todos_los_comentarios = [dict(row) for row in cursor.fetchall()]
+        conn_sqlite.row_factory = None
+        
+        print("--- Iniciando envío al endpoint... ---")
+        cargaEndpoint(JSON_HISTORICO, ENDPOINT)
+        enviar_carpeta_imagenes_memoria(CARPETA_IMAGENES, "historico", ENDPOINT)
+        
+        print("--- Envío exitoso, actualizando estado en la base de datos. ---")
+        update_status_exitoso(conn_sqlite, todos_los_comentarios)
+        
+        conn_sqlite.commit()
+
+    except Exception as e:
+        print(f"--- ERROR DURANTE EL ENVÍO: {e}. El estado no se actualizará. ---")
+
+    print("--- ENVÍO COMPLETADO ---")
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Error: Debe proporcionar un parámetro de ejecución (historico, temp, jsonhistorico, enviojsonendpoint).")
+        sys.exit(1)
+    
+    parametro = sys.argv[1].lower()
+    log()
+    
+    session = None
+    conn_sqlite = None
+    
+    try:
+        if parametro in ["historico", "temp"]:
+            session = conectar_snowflake()
+            conn_sqlite = conectar_sqlite()
+            
+            if parametro == "historico":
+                modo_historico(session, conn_sqlite)
+            else:
+                modo_temp(session, conn_sqlite)
+        
+        elif parametro in ["jsonhistorico", "enviojsonendpoint"]:
+            conn_sqlite = conectar_sqlite()
+            if parametro == "jsonhistorico":
+                modo_json_historico(conn_sqlite)
+            else:
+                modo_envio_endpoint(conn_sqlite)
+        
+        else:
+            print(f"Error: Parámetro '{parametro}' no reconocido.")
+            sys.exit(1)
+    
+    finally:
+        if conn_sqlite:
+            conn_sqlite.close()
+            print("Conexión a SQLite cerrada.")
+        if session:
+            session.close()
+            print("Conexión a Snowflake cerrada.")
+
+
+if __name__ == "__main__":
+    main()
