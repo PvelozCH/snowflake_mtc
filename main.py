@@ -26,7 +26,7 @@ CARPETA_IMAGENES = "carpeta_imagenes"
 
 # Query para obtener lista de órdenes de trabajo
 QUERY_OT = """
-    SELECT DISTINCT activity_id, sap_work_number 
+    SELECT DISTINCT activity_id, sap_work_number AS OT
     FROM sw_temp_maintainer_comments 
     WHERE activity_mwc = 'SN16'
 """
@@ -34,7 +34,7 @@ QUERY_OT = """
 # Query para obtener comentarios con sus detalles
 QUERY_COMENTARIOS = f"""
     WITH TodasLasOT AS (
-        SELECT DISTINCT activity_id, sap_work_number
+        SELECT DISTINCT activity_id, sap_work_number AS OT
         FROM sw_temp_maintainer_comments
         WHERE activity_mwc = 'SN16'
     ),
@@ -49,13 +49,13 @@ QUERY_COMENTARIOS = f"""
         WHERE a.comment_used_for IN ('Notification', 'Report')
     )
     SELECT 
-        c.id, t.activity_id, t.sap_work_number, c.role_name, c.work_sequence_name,
+        c.id, t.activity_id, t.OT, c.role_name, c.work_sequence_name,
         c.element_step, c.element_instance_name, c.suffix, c.comment_title,
         c.comment_description, c.location_urls, c.comment_used_for, c.created_date,
         c.activity_name
     FROM ComentariosPorOT AS c
-    INNER JOIN TodasLasOT AS t ON c.activity_id = t.activity_id AND c.sap_work_number = t.sap_work_number
-    ORDER BY t.sap_work_number, c.id;
+    INNER JOIN TodasLasOT AS t ON c.activity_id = t.activity_id AND c.sap_work_number = t.OT
+    ORDER BY t.OT, c.id;
 """
 
 

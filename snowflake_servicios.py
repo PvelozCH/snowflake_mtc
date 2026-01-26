@@ -174,19 +174,19 @@ def crear_tabla_comentarios(cursor):
 # FUNCIONES DE INSERCIÓN Y CONSULTA EN SQLITE
 # ============================================================================
 
-def insertar_ot(conn_sqlite, cursor, activity_id, sap_work_number):
+def insertar_ot(conn_sqlite, cursor, activity_id, ot):
     """
     Inserta una orden de trabajo en SQLite. Retorna True si se insertó, False si ya existía.
     """
-    firma = generar_md5(activity_id, sap_work_number)
+    firma = generar_md5(activity_id, ot)
     
     try:
-        cursor.execute("INSERT INTO ot_lista(ACTIVITY_ID, OT, MD5) VALUES (?,?,?)", (activity_id, sap_work_number, firma))
+        cursor.execute("INSERT INTO ot_lista(ACTIVITY_ID, OT, MD5) VALUES (?,?,?)", (activity_id, ot, firma))
         conn_sqlite.commit()
-        logger.info(f"Nueva OT guardada en SQLite: ACTIVITY_ID={activity_id}, OT={sap_work_number}")
+        logger.info(f"Nueva OT guardada en SQLite: ACTIVITY_ID={activity_id}, OT={ot}")
         return True
     except sqlite3.IntegrityError:
-        logger.debug(f"OT ya existente (mismo MD5), omitiendo inserción: ACTIVITY_ID={activity_id}, OT={sap_work_number}")
+        logger.debug(f"OT ya existente (mismo MD5), omitiendo inserción: ACTIVITY_ID={activity_id}, OT={ot}")
         return False
 
 
@@ -296,7 +296,7 @@ def extraer_datos_comentario(row):
     return {
         'comment_id': row["ID"],
         'activity_id': row["ACTIVITY_ID"],
-        'sap_work_number': row["SAP_WORK_NUMBER"],
+        'OT': row["OT"],
         'role_name': row["ROLE_NAME"],
         'work_sequence_name': row["WORK_SEQUENCE_NAME"],
         'element_step': row["ELEMENT_STEP"],
@@ -313,9 +313,9 @@ def extraer_datos_comentario(row):
 
 def preparar_datos_insercion(datos):
     """Prepara los datos para inserción en SQLite. Retorna: (tupla_para_insert, firma_md5)"""
-    firma = generar_md5(datos['activity_id'], datos['sap_work_number'])
+    firma = generar_md5(datos['activity_id'], datos['OT'])
     return (
-        datos['comment_id'], datos['activity_id'], datos['sap_work_number'],
+        datos['comment_id'], datos['activity_id'], datos['OT'],
         datos['role_name'], datos['work_sequence_name'], datos['element_step'],
         datos['element_instance_name'], datos['suffix'], datos['comment_title'],
         datos['comment_description'], datos['location_urls'], datos['comment_used_for'],
@@ -359,7 +359,7 @@ def crear_ot(session, query_inicio, conn_sqlite):
         
         cont = 0
         for row in rows:
-            if insertar_ot(conn_sqlite, cursor, row["ACTIVITY_ID"], row["SAP_WORK_NUMBER"]):
+            if insertar_ot(conn_sqlite, cursor, row["ACTIVITY_ID"], row["OT"]):
                 cont += 1
         
         logger.info(f"Sincronización de OTs finalizada. Total de OTs nuevas guardadas: {cont}")
@@ -442,12 +442,12 @@ def crear_comentarios_temp(session, query, conn_sqlite):
                 procesar_imagenes_historico(datos['location_urls'], comment_id)
                 
                 if not ot_existe(cursor, firma):
-                    insertar_ot(conn_sqlite, cursor, datos['activity_id'], datos['sap_work_number'])
+                    insertar_ot(conn_sqlite, cursor, datos['activity_id'], datos['OT'])
                 
                 # Preparar datos para el JSON que se enviará al endpoint
                 comentarios_nuevos_para_envio.append({
                     "ID": comment_id, "ACTIVITY_ID": datos['activity_id'],
-                    "OT": datos['sap_work_number'], "ACTIVITY_NAME": datos['activity_name'],
+                    "OT": datos['OT'], "ACTIVITY_NAME": datos['activity_name'],
                     "ROLE_NAME": datos['role_name'], "WORK_SEQUENCE_NAME": datos['work_sequence_name'],
                     "ELEMENT_STEP": datos['element_step'], "ELEMENT_INSTANCE_NAME": datos['element_instance_name'],
                     "SUFFIX": datos['suffix'], "COMMENT_TITLE": datos['comment_title'],
