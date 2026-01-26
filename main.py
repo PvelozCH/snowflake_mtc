@@ -118,14 +118,9 @@ def modo_historico(session, conn_sqlite):
 
 def modo_temp(session, conn_sqlite):
     """
-    Modo de carga incremental con estado:
-    1. Sincroniza y guarda nuevos comentarios desde Snowflake (quedan como 'pendiente').
-    2. Obtiene TODOS los comentarios 'pendientes' (nuevos + reintentos).
-    3. Genera un JSON con ellos y lo envía al endpoint.
-    4. Si el envío es exitoso, actualiza su estado a 'exitoso'.
+    Modo de carga incremental con estado. El procesamiento es atómico por comentario.
     """
     print("--- MODO TEMPORAL (CON ESTADO) ---")
-    # Estos se guardan con estado 'pendiente' por defecto.
     crear_ot(session, QUERY_OT, conn_sqlite)
     crear_comentarios(session, QUERY_COMENTARIOS, conn_sqlite, "temp")
     
@@ -136,30 +131,37 @@ def modo_temp(session, conn_sqlite):
         print("--- PROCESO TEMPORAL COMPLETADO: No hay comentarios pendientes para enviar. ---")
         return
 
-    nombre_json_temp = crear_json_temporal(comentarios_a_enviar)
-    if not nombre_json_temp:
-        conn_sqlite.commit()
-        print("--- ERROR: No se pudo generar el archivo JSON temporal. ---")
-        return
-    
-    # Envío por endpoint
-    
-    try:
-        print(f"--- Hay {len(comentarios_a_enviar)} comentarios pendientes para enviar. ---")
-        print("--- Iniciando envío al endpoint... ---")
-        cargaEndpoint(nombre_json_temp, ENDPOINT)
-        enviar_imagenes_nuevas(comentarios_a_enviar, CARPETA_IMAGENES, ENDPOINT_IMG)
-        
-        # Si el envío fuera exitoso, se actualiza el estado.
-        print("--- Envío exitoso, actualizando estado en la base de datos. ---")
-        update_status_exitoso(conn_sqlite, comentarios_a_enviar)
-        
-        print("--- Simulación de envío completada (envío real comentado). El estado no se ha modificado. ---")
+    print(f"--- Hay {len(comentarios_a_enviar)} comentarios pendientes para procesar. ---")
+    comentarios_exitosos = []
 
-    except Exception as e:
-        print(f"--- ERROR DURANTE EL ENVÍO: {e}. Los comentarios seguirán como 'pendientes'. ---")
-    
+    for comentario in comentarios_a_enviar:
+        comentario_individual = [comentario]
+        nombre_json_temp = None # Initialize outside try
+        try:
+            nombre_json_temp = crear_json_temporal(comentario_individual)
+            
+            if not nombre_json_temp:
+                print(f"--- ERROR: No se pudo generar el archivo JSON temporal para comentario ID {comentario.get('ID')}. El comentario seguirá como 'pendiente'. ---")
+                continue # Skip to next comment
+            
+            print(f"--- Procesando comentario ID {comentario.get('ID')}... ---")
+            cargaEndpoint(nombre_json_temp, ENDPOINT)
+            enviar_imagenes_nuevas(comentario_individual, CARPETA_IMAGENES, ENDPOINT_IMG)
+            
+            comentarios_exitosos.append(comentario)
+            print(f"--- Comentario ID {comentario.get('ID')} enviado con éxito. ---")
 
+        except Exception as e:
+            print(f"--- ERROR durante el envío del comentario ID {comentario.get('ID')}: {e}. El comentario seguirá como 'pendiente'. ---")
+        
+        finally:
+            if nombre_json_temp and os.path.exists(nombre_json_temp):
+                os.remove(nombre_json_temp)
+
+    if comentarios_exitosos:
+        print(f"--- Envío finalizado. Actualizando estado para {len(comentarios_exitosos)} comentarios exitosos. ---")
+        update_status_exitoso(conn_sqlite, comentarios_exitosos)
+    
     conn_sqlite.commit()
     print("--- PROCESO TEMPORAL COMPLETADO ---")
 
@@ -168,7 +170,8 @@ def enviar_imagenes_nuevas(nuevos_comentarios, carpeta_imagenes, endpoint):
     """
     Recorre la lista de comentarios nuevos y envía solo las imágenes asociadas.
     """
-    print(f"Buscando imágenes para {len(nuevos_comentarios)} comentarios nuevos...")
+    # Adjusted print statement for clarity, as it now often receives a single comment
+    print(f"Buscando imágenes para {len(nuevos_comentarios)} comentario(s)...")
     for comentario in nuevos_comentarios:
         comment_id = comentario.get('ID')
         if not comment_id:
@@ -208,8 +211,9 @@ def modo_envio_endpoint(conn_sqlite):
     """
     Modo de prueba: envía datos históricos existentes al endpoint
     y actualiza el estado de todos los comentarios a 'exitoso' si no hay error.
+    EL PROCESAMIENTO ES ATÓMICO POR LOTE.
     """
-    print("--- MODO ENVÍO A ENDPOINT ---")
+    print("--- MODO ENVÍO A ENDPOINT (LOTE COMPLETO) ---")
     
     try:
         conn_sqlite.row_factory = sqlite3.Row
@@ -218,24 +222,66 @@ def modo_envio_endpoint(conn_sqlite):
         todos_los_comentarios = [dict(row) for row in cursor.fetchall()]
         conn_sqlite.row_factory = None
         
-        print("--- Iniciando envío al endpoint... ---")
+        if not todos_los_comentarios:
+            print("No hay comentarios en la base de datos para enviar.")
+            conn_sqlite.commit()
+            return
+
+        print(f"--- Iniciando envío de {len(todos_los_comentarios)} comentarios al endpoint... ---")
         cargaEndpoint(JSON_HISTORICO, ENDPOINT)
         enviar_carpeta_imagenes_memoria(CARPETA_IMAGENES, "historico", ENDPOINT_IMG)
         
-        print("--- Envío exitoso, actualizando estado en la base de datos. ---")
+        print("--- Envío de lote completo exitoso, actualizando estado en la base de datos. ---")
         update_status_exitoso(conn_sqlite, todos_los_comentarios)
         
         conn_sqlite.commit()
 
     except Exception as e:
-        print(f"--- ERROR DURANTE EL ENVÍO: {e}. El estado no se actualizará. ---")
+        print(f"--- ERROR DURANTE EL ENVÍO DEL LOTE: {e}. El estado no se actualizará para ningún comentario. ---")
+        conn_sqlite.rollback() # Rollback changes if error
+    finally:
+        print("--- ENVÍO COMPLETADO ---")
 
-    print("--- ENVÍO COMPLETADO ---")
+
+def modo_solo_fotos(conn_sqlite):
+    """
+    Busca comentarios pendientes y envía solo sus imágenes asociadas.
+    El procesamiento es atómico por comentario.
+    """
+    print("--- MODO ENVIAR SOLO FOTOS DE PENDIENTES ---")
+    
+    comentarios_pendientes = get_pending_comentarios(conn_sqlite)
+    
+    if not comentarios_pendientes:
+        print("--- No hay comentarios pendientes. No se enviaron fotos. ---")
+        conn_sqlite.commit()
+        return
+
+    print(f"--- Se encontraron {len(comentarios_pendientes)} comentarios pendientes. Procesando sus fotos... ---")
+    comentarios_exitosos = []
+
+    for comentario in comentarios_pendientes:
+        try:
+            print(f"--- Procesando fotos para comentario ID {comentario.get('ID')}... ---")
+            enviar_imagenes_nuevas([comentario], CARPETA_IMAGENES, ENDPOINT_IMG)
+            
+            comentarios_exitosos.append(comentario)
+            print(f"--- Fotos para comentario ID {comentario.get('ID')} enviadas con éxito. ---")
+
+        except Exception as e:
+            print(f"--- ERROR durante el envío de fotos para el comentario ID {comentario.get('ID')}: {e}. El comentario seguirá como 'pendiente'. ---")
+
+    if comentarios_exitosos:
+        print(f"--- Envío finalizado. Actualizando estado para {len(comentarios_exitosos)} comentarios exitosos. ---")
+        update_status_exitoso(conn_sqlite, comentarios_exitosos)
+    
+    conn_sqlite.commit()
+    print("--- PROCESO DE ENVÍO DE FOTOS COMPLETADO ---")
 
 
 def main():
     if len(sys.argv) < 2:
-        print("Error: Debe proporcionar un parámetro de ejecución (historico, temp, jsonhistorico, enviojsonendpoint).")
+        print("Error: Debe proporcionar un parámetro de ejecución (historico, temp, jsonhistorico, enviojsonendpoint, solofotos).")
         sys.exit(1)
     
     parametro = sys.argv[1].lower()
@@ -251,15 +297,17 @@ def main():
             
             if parametro == "historico":
                 modo_historico(session, conn_sqlite)
-            else:
+            else: # parametro == "temp"
                 modo_temp(session, conn_sqlite)
         
-        elif parametro in ["jsonhistorico", "enviojsonendpoint"]:
+        elif parametro in ["jsonhistorico", "enviojsonendpoint", "solofotos"]:
             conn_sqlite = conectar_sqlite()
             if parametro == "jsonhistorico":
                 modo_json_historico(conn_sqlite)
-            else:
+            elif parametro == "enviojsonendpoint":
                 modo_envio_endpoint(conn_sqlite)
+            else: # parametro == "solofotos"
+                modo_solo_fotos(conn_sqlite)
         
         else:
             print(f"Error: Parámetro '{parametro}' no reconocido.")
