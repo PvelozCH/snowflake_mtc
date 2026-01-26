@@ -195,7 +195,7 @@ def insertar_comentario(conn_sqlite, cursor, datos_comentario):
     try:
         cursor.execute("""
             INSERT INTO comentarios(
-                ID, ACTIVITY_ID, OT, ROLE_NAME, WORK_SEQUENCE_NAME,
+                id, ACTIVITY_ID, OT, ROLE_NAME, WORK_SEQUENCE_NAME,
                 ELEMENT_STEP, ELEMENT_INSTANCE_NAME, SUFFIX, COMMENT_TITLE,
                 COMMENT_DESCRIPTION, LOCATION_URLS, COMMENT_USED_FOR, CREATED_DATE,
                 MD5, ACTIVITY_NAME
@@ -210,7 +210,7 @@ def insertar_comentario(conn_sqlite, cursor, datos_comentario):
 
 def comentario_existe(cursor, comment_id):
     """Verifica si un comentario ya existe en SQLite por su ID"""
-    cursor.execute("SELECT 1 FROM comentarios WHERE ID = ?", (comment_id,))
+    cursor.execute("SELECT 1 FROM comentarios WHERE id = ?", (comment_id,))
     return cursor.fetchone() is not None
 
 
@@ -229,7 +229,28 @@ def get_pending_comentarios(conn_sqlite):
     try:
         conn_sqlite.row_factory = sqlite3.Row
         cursor = conn_sqlite.cursor()
-        cursor.execute("SELECT * FROM comentarios WHERE status = 'pendiente'")
+        # Se renombra 'id' a 'ID' para que la clave del diccionario coincida con el resto del código.
+        cursor.execute("""
+            SELECT 
+                id AS ID,
+                ACTIVITY_ID, 
+                OT, 
+                ROLE_NAME, 
+                WORK_SEQUENCE_NAME, 
+                ELEMENT_STEP, 
+                ELEMENT_INSTANCE_NAME, 
+                SUFFIX, 
+                COMMENT_TITLE, 
+                COMMENT_DESCRIPTION, 
+                LOCATION_URLS, 
+                COMMENT_USED_FOR, 
+                CREATED_DATE, 
+                MD5, 
+                status, 
+                ACTIVITY_NAME 
+            FROM comentarios 
+            WHERE status = 'pendiente'
+        """)
         rows = cursor.fetchall()
         comentarios = [dict(row) for row in rows]
         logger.info(f"Se encontraron {len(comentarios)} comentarios con estado 'pendiente'.")
@@ -245,13 +266,21 @@ def update_status_exitoso(conn_sqlite, comentarios):
     if not comentarios:
         return
     
-    comment_ids = [c['ID'] for c in comentarios]
+    # Se asegura de obtener el ID independientemente de si la clave es 'ID' o 'id'.
+    comment_ids = [c.get('ID', c.get('id')) for c in comentarios]
+    comment_ids = [cid for cid in comment_ids if cid is not None]
+
+    if not comment_ids:
+        logger.warning("No se encontraron IDs de comentarios válidos para actualizar el estado.")
+        return
+
     logger.info(f"Actualizando estado a 'exitoso' para {len(comment_ids)} comentarios...")
     
     try:
         cursor = conn_sqlite.cursor()
         placeholders = ','.join('?' for _ in comment_ids)
-        query = f"UPDATE comentarios SET status = 'exitoso' WHERE ID IN ({placeholders})"
+        # La columna en la BDD es 'id' en minúsculas.
+        query = f"UPDATE comentarios SET status = 'exitoso' WHERE id IN ({placeholders})"
         cursor.execute(query, comment_ids)
         logger.info(f"{cursor.rowcount} filas de comentarios actualizadas a 'exitoso' en la base de datos.")
     except Exception:
