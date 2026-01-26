@@ -255,11 +255,31 @@ def get_pending_comentarios(conn_sqlite):
         comentarios = [dict(row) for row in rows]
         logger.info(f"Se encontraron {len(comentarios)} comentarios con estado 'pendiente'.")
         return comentarios
+    except sqlite3.OperationalError as e:
+        logger.error(f"Error operacional de SQLite: {e}. Es posible que la columna 'OT' no exista en la tabla 'comentarios'. Si estás usando un modo que no sea 'historico' o 'temp', prueba a ejecutar 'historico' primero para actualizar el esquema de la base de datos.")
+        return []
     except Exception:
         logger.exception("Error al obtener comentarios pendientes de SQLite.")
         return []
     finally:
         conn_sqlite.row_factory = None
+
+def get_pending_comentario_ids(conn_sqlite):
+    """
+    Obtiene solo los IDs de los comentarios con estado 'pendiente' de SQLite.
+    Es una versión ligera para 'solofotos' que no necesita todos los datos.
+    """
+    try:
+        cursor = conn_sqlite.cursor()
+        cursor.execute("SELECT id FROM comentarios WHERE status = 'pendiente'")
+        rows = cursor.fetchall()
+        # Se retorna una lista de diccionarios para mantener la estructura de datos esperada.
+        comentarios = [{'ID': row[0]} for row in rows]
+        logger.info(f"Se encontraron {len(comentarios)} IDs de comentarios con estado 'pendiente'.")
+        return comentarios
+    except Exception:
+        logger.exception("Error al obtener IDs de comentarios pendientes de SQLite.")
+        return []
 
 def update_status_exitoso(conn_sqlite, comentarios):
     """Actualiza el estado de una lista de comentarios a 'exitoso'."""

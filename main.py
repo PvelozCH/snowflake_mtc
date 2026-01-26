@@ -3,8 +3,7 @@ import sqlite3
 import os
 from snowflake.snowpark import Session
 
-from logger_config import logger, start_run_log
-from snowflake_servicios import crear_ot, crear_comentarios, crear_json_temporal, get_pending_comentarios, update_status_exitoso
+from snowflake_servicios import crear_ot, crear_comentarios, crear_json_temporal, get_pending_comentarios, get_pending_comentario_ids, update_status_exitoso
 from carga_servicios import jsonHistorico, cargaEndpoint, enviar_carpeta_imagenes_memoria, enviar_imagen_json_memoria
 
 CONEXION_SNOWFLAKE = {
@@ -231,7 +230,7 @@ def modo_solo_fotos(conn_sqlite):
     """
     logger.info("--- INICIANDO MODO ENVIAR SOLO FOTOS DE PENDIENTES ---")
     
-    comentarios_pendientes = get_pending_comentarios(conn_sqlite)
+    comentarios_pendientes = get_pending_comentario_ids(conn_sqlite)
     
     if not comentarios_pendientes:
         logger.info("No hay comentarios pendientes. No se enviaron fotos.")
@@ -245,6 +244,7 @@ def modo_solo_fotos(conn_sqlite):
         comentario_id = comentario.get('ID')
         try:
             logger.info(f"Procesando fotos para comentario ID {comentario_id}...")
+            # La función enviar_imagenes_nuevas espera una lista de diccionarios
             enviar_imagenes_nuevas([comentario], CARPETA_IMAGENES, ENDPOINT_IMG)
             
             comentarios_exitosos.append(comentario)
