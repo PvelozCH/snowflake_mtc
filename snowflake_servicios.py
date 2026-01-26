@@ -15,21 +15,11 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+from logger_config import logger
+
 # ============================================================================
 # FUNCIONES DE UTILIDAD GENERAL
 # ============================================================================
-
-def log():
-    """Inicializa el archivo de log sobrescribiendo el existente"""
-    with open("Log.txt", "w", encoding="utf-8") as archivo:
-        archivo.write("LOG DE EJECUCIÓN Y DE ERRORES\n")
-
-
-def agregarEnLog(texto):
-    """Agrega una línea al archivo de log"""
-    with open("Log.txt", "a", encoding="utf-8") as archivo:
-        archivo.write(texto + "\n")
-
 
 def generar_md5(*valores):
     """Genera un hash MD5 a partir de múltiples valores concatenados"""
@@ -50,9 +40,8 @@ def descarga_img_selenium(url, contImg, ID):
     nombre = f"{ID}_{contImg}.jpg"
     ruta_destino = os.path.join("carpeta_imagenes", nombre)
 
-    # Verificar si la imagen ya existe para no duplicarla
     if os.path.exists(ruta_destino):
-        print(f"Imagen ya existe, se omite la descarga: {ruta_destino}")
+        logger.info(f"Imagen ya existe, se omite la descarga: {ruta_destino}")
         return ruta_destino
 
     options = webdriver.EdgeOptions()
@@ -60,15 +49,13 @@ def descarga_img_selenium(url, contImg, ID):
     driver = webdriver.Edge(options=options)
     
     try:
+        logger.info(f"Iniciando descarga de imagen desde URL: {url}")
         driver.get(url)
         
-        # Esperar a que la imagen cargue
         wait = WebDriverWait(driver, 20)
         img = wait.until(EC.presence_of_element_located((By.TAG_NAME, "img")))
-        
         src = img.get_attribute("src")
         
-        # Script JS para obtener la imagen en base64
         js = """
         const url = arguments[0];
         return fetch(url)
@@ -83,22 +70,19 @@ def descarga_img_selenium(url, contImg, ID):
         base64_data = driver.execute_script(js, src)
         
         if not base64_data:
-            print("No se pudo descargar la imagen con JS")
+            logger.error(f"No se pudo obtener la imagen en base64 con JS desde la URL: {url}")
             return None
         
-        # Decodificar y guardar la imagen
         imagen = base64.b64decode(base64_data)
         
         with open(ruta_destino, "wb") as f:
             f.write(imagen)
         
-        print("Imagen descargada OK:", ruta_destino)
+        logger.info(f"Imagen descargada y guardada exitosamente en: {ruta_destino}")
         return ruta_destino
     
-    except Exception as e:
-        print("Error descargando:", e)
-        agregarEnLog("### ERROR ###")
-        agregarEnLog(f"Error procesando: {e}")
+    except Exception:
+        logger.exception(f"Error fatal al descargar o procesar la imagen desde la URL: {url}")
         return None
     
     finally:
@@ -106,14 +90,12 @@ def descarga_img_selenium(url, contImg, ID):
 
 
 # ============================================================================
-# FUNCIONES DE PROCESAMIENTO DE IMÁGENES (POR MODO)
+# FUNCIONES DE PROCESAMIENTO DE IMÁGENES
 # ============================================================================
 
 def procesar_imagenes_historico(location_urls, comment_id):
     """
-    Procesa imágenes en modo HISTÓRICO:
-    - Solo descarga y guarda las imágenes localmente
-    - No envía al endpoint (se envían todas al final)
+    Procesa y descarga imágenes asociadas a un comentario.
     """
     if not location_urls:
         return 0
@@ -122,22 +104,26 @@ def procesar_imagenes_historico(location_urls, comment_id):
     
     try:
         urls = ast.literal_eval(location_urls)
+        if not isinstance(urls, list):
+            logger.warning(f"El formato de location_urls para el comentario {comment_id} no es una lista: {location_urls}")
+            return 0
+
         cont_img = 1
-        
         for url in urls:
             if not url:
                 continue
             
-            print(f"    -> Descargando imagen {cont_img} para comentario {comment_id}...")
+            logger.info(f"Procesando imagen {cont_img}/{len(urls)} para comentario ID {comment_id}...")
             ruta_img = descarga_img_selenium(url, cont_img, comment_id)
             
             if ruta_img:
                 cont_img += 1
                 contador_imagenes += 1
     
-    except Exception as e:
-        print(f"Error procesando imágenes para comentario {comment_id}: {e}")
-        agregarEnLog(f"### ERROR ###\nError procesando imágenes para comentario {comment_id}: {e}")
+    except (ValueError, SyntaxError):
+        logger.error(f"Error de formato en 'location_urls' para comentario ID {comment_id}. Valor: {location_urls}")
+    except Exception:
+        logger.exception(f"Error inesperado procesando imágenes para comentario ID {comment_id}.")
     
     return contador_imagenes
 
@@ -156,7 +142,7 @@ def crear_tabla_ot(cursor):
         MD5 TEXT UNIQUE
     )
     """)
-    print("Conexion correcta tabla ot_lista sqlite")
+    logger.info("Tabla 'ot_lista' asegurada en SQLite.")
 
 
 def crear_tabla_comentarios(cursor):
@@ -181,7 +167,7 @@ def crear_tabla_comentarios(cursor):
         ACTIVITY_NAME TEXT
     )
     """)
-    print("Se crea tabla de comentarios en sqlite!")
+    logger.info("Tabla 'comentarios' asegurada en SQLite.")
 
 
 # ============================================================================
@@ -190,35 +176,36 @@ def crear_tabla_comentarios(cursor):
 
 def insertar_ot(conn_sqlite, cursor, activity_id, sap_work_number):
     """
-    Inserta una orden de trabajo en SQLite y guarda el cambio inmediatamente.
-    Retorna True si se insertó, False si ya existía (por MD5 duplicado).
+    Inserta una orden de trabajo en SQLite. Retorna True si se insertó, False si ya existía.
     """
     firma = generar_md5(activity_id, sap_work_number)
     
     try:
-        cursor.execute("""
-            INSERT INTO ot_lista(ACTIVITY_ID, OT, MD5) 
-            VALUES (?,?,?)
-        """, (activity_id, sap_work_number, firma))
+        cursor.execute("INSERT INTO ot_lista(ACTIVITY_ID, OT, MD5) VALUES (?,?,?)", (activity_id, sap_work_number, firma))
         conn_sqlite.commit()
-        print(f"  -> Nueva OT guardada en SQLite: {activity_id} / {sap_work_number}")
+        logger.info(f"Nueva OT guardada en SQLite: ACTIVITY_ID={activity_id}, OT={sap_work_number}")
         return True
     except sqlite3.IntegrityError:
+        logger.debug(f"OT ya existente (mismo MD5), omitiendo inserción: ACTIVITY_ID={activity_id}, OT={sap_work_number}")
         return False
 
 
 def insertar_comentario(conn_sqlite, cursor, datos_comentario):
-    """Inserta un comentario completo en SQLite y guarda el cambio inmediatamente."""
-
-    cursor.execute("""
-        INSERT INTO comentarios(
-            ID, ACTIVITY_ID, OT, ROLE_NAME, WORK_SEQUENCE_NAME,
-            ELEMENT_STEP, ELEMENT_INSTANCE_NAME, SUFFIX, COMMENT_TITLE,
-            COMMENT_DESCRIPTION, LOCATION_URLS, COMMENT_USED_FOR, CREATED_DATE,
-            MD5, ACTIVITY_NAME
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, datos_comentario)
-    conn_sqlite.commit()
+    """Inserta un comentario completo en SQLite. Lanza excepción en caso de error."""
+    try:
+        cursor.execute("""
+            INSERT INTO comentarios(
+                ID, ACTIVITY_ID, OT, ROLE_NAME, WORK_SEQUENCE_NAME,
+                ELEMENT_STEP, ELEMENT_INSTANCE_NAME, SUFFIX, COMMENT_TITLE,
+                COMMENT_DESCRIPTION, LOCATION_URLS, COMMENT_USED_FOR, CREATED_DATE,
+                MD5, ACTIVITY_NAME
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, datos_comentario)
+        conn_sqlite.commit()
+        logger.info(f"Nuevo comentario guardado en SQLite: ID={datos_comentario[0]}")
+    except sqlite3.IntegrityError:
+        logger.warning(f"Intento de insertar comentario duplicado (ID ya existe): ID={datos_comentario[0]}")
+        raise # relanzar para que el flujo principal lo maneje
 
 
 def comentario_existe(cursor, comment_id):
@@ -245,8 +232,11 @@ def get_pending_comentarios(conn_sqlite):
         cursor.execute("SELECT * FROM comentarios WHERE status = 'pendiente'")
         rows = cursor.fetchall()
         comentarios = [dict(row) for row in rows]
-        print(f"Se encontraron {len(comentarios)} comentarios 'pendientes' para procesar.")
+        logger.info(f"Se encontraron {len(comentarios)} comentarios con estado 'pendiente'.")
         return comentarios
+    except Exception:
+        logger.exception("Error al obtener comentarios pendientes de SQLite.")
+        return []
     finally:
         conn_sqlite.row_factory = None
 
@@ -256,15 +246,16 @@ def update_status_exitoso(conn_sqlite, comentarios):
         return
     
     comment_ids = [c['ID'] for c in comentarios]
-    print(f"Actualizando estado a 'exitoso' para {len(comment_ids)} comentarios...")
+    logger.info(f"Actualizando estado a 'exitoso' para {len(comment_ids)} comentarios...")
     
-    cursor = conn_sqlite.cursor()
-    
-    placeholders = ','.join('?' for _ in comment_ids)
-    query = f"UPDATE comentarios SET status = 'exitoso' WHERE ID IN ({placeholders})"
-    
-    cursor.execute(query, comment_ids)
-    print(f"  -> {cursor.rowcount} comentarios actualizados exitosamente.")
+    try:
+        cursor = conn_sqlite.cursor()
+        placeholders = ','.join('?' for _ in comment_ids)
+        query = f"UPDATE comentarios SET status = 'exitoso' WHERE ID IN ({placeholders})"
+        cursor.execute(query, comment_ids)
+        logger.info(f"{cursor.rowcount} filas de comentarios actualizadas a 'exitoso' en la base de datos.")
+    except Exception:
+        logger.exception(f"Error al actualizar el estado para los IDs de comentario: {comment_ids}")
 
 
 # ============================================================================
@@ -272,10 +263,7 @@ def update_status_exitoso(conn_sqlite, comentarios):
 # ============================================================================
 
 def extraer_datos_comentario(row):
-    """
-    Extrae los datos de un row de Snowflake y los convierte en un diccionario limpio
-    """
-
+    """Extrae los datos de un row de Snowflake y los convierte en un diccionario limpio"""
     return {
         'comment_id': row["ID"],
         'activity_id': row["ACTIVITY_ID"],
@@ -295,64 +283,33 @@ def extraer_datos_comentario(row):
 
 
 def preparar_datos_insercion(datos):
-    """
-    Prepara los datos para inserción en SQLite
-    Retorna: (tupla_para_insert, firma_md5)
-    """
+    """Prepara los datos para inserción en SQLite. Retorna: (tupla_para_insert, firma_md5)"""
     firma = generar_md5(datos['activity_id'], datos['sap_work_number'])
-    
     return (
-        datos['comment_id'],
-        datos['activity_id'],
-        datos['sap_work_number'],
-        datos['role_name'],
-        datos['work_sequence_name'],
-        datos['element_step'],
-        datos['element_instance_name'],
-        datos['suffix'],
-        datos['comment_title'],
-        datos['comment_description'],
-        datos['location_urls'],
-        datos['comment_used_for'],
-        datos['created_date'],
-        firma, 
-        datos["activity_name"] 
+        datos['comment_id'], datos['activity_id'], datos['sap_work_number'],
+        datos['role_name'], datos['work_sequence_name'], datos['element_step'],
+        datos['element_instance_name'], datos['suffix'], datos['comment_title'],
+        datos['comment_description'], datos['location_urls'], datos['comment_used_for'],
+        datos['created_date'], firma, datos["activity_name"] 
     ), firma
 
 def crear_json_temporal(comentarios_nuevos):
-    """
-    Crea un archivo JSON temporal con los comentarios nuevos
-    Retorna el nombre del archivo creado o None si no hay comentarios
-    """
+    """Crea un archivo JSON temporal con los comentarios nuevos."""
     if not comentarios_nuevos:
+        logger.warning("No se recibieron comentarios nuevos para crear el JSON temporal.")
         return None
     
     fecha = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     nombre = f"comentarios_temp_{fecha}.json"
     
-    with open(nombre, "w", encoding="utf-8") as f:
-        json.dump(comentarios_nuevos, f, ensure_ascii=False, indent=4)
-    
-    print(f"Se encontraron {len(comentarios_nuevos)} comentarios nuevos")
-    return nombre
-
-
-# ============================================================================
-# FUNCIONES AUXILIARES
-# ============================================================================
-
-def contar_imagenes_totales(rows_comments):
-    """Cuenta el total de imágenes en todos los comentarios"""
-    cont_imagenes = 0
-    for row in rows_comments:
-        location_urls = row["LOCATION_URLS"]
-        if location_urls:
-            try:
-                urls = ast.literal_eval(location_urls)
-                cont_imagenes += len([url for url in urls if url])
-            except:
-                pass
-    return cont_imagenes
+    try:
+        with open(nombre, "w", encoding="utf-8") as f:
+            json.dump(comentarios_nuevos, f, ensure_ascii=False, indent=4, default=str)
+        logger.info(f"JSON temporal creado '{nombre}' con {len(comentarios_nuevos)} comentarios.")
+        return nombre
+    except Exception:
+        logger.exception(f"Error al crear el archivo JSON temporal '{nombre}'.")
+        return None
 
 
 # ============================================================================
@@ -360,149 +317,139 @@ def contar_imagenes_totales(rows_comments):
 # ============================================================================
 
 def crear_ot(session, query_inicio, conn_sqlite):
-    """
-    Obtiene las órdenes de trabajo desde Snowflake y las guarda en SQLite
-    Evita duplicados usando hash MD5 y guarda cada una individualmente.
-    """
+    """Obtiene las OTs desde Snowflake y las guarda en SQLite."""
+    logger.info("Iniciando subproceso: Sincronización de Órdenes de Trabajo (OTs).")
     try:
         cursor = conn_sqlite.cursor()
         crear_tabla_ot(cursor)
         
+        logger.info("Ejecutando query de OTs en Snowflake...")
         ot = session.sql(query_inicio)
         rows = ot.collect()
-        print(f"### OBTENIENDO OTs: {len(rows)} OTs recibidas de Snowflake ###")
+        logger.info(f"Query ejecutada. {len(rows)} OTs recibidas de Snowflake.")
         
         cont = 0
         for row in rows:
-            ac_id = row["ACTIVITY_ID"]
-            swn = row["SAP_WORK_NUMBER"]
-            
-            if insertar_ot(conn_sqlite, cursor, ac_id, swn):
+            if insertar_ot(conn_sqlite, cursor, row["ACTIVITY_ID"], row["SAP_WORK_NUMBER"]):
                 cont += 1
         
-        print(f"Total de OTs nuevas guardadas en esta ejecución: {cont}")
+        logger.info(f"Sincronización de OTs finalizada. Total de OTs nuevas guardadas: {cont}")
     
-    except Exception as e:
-        print(f"Error al conectar o ejecutar la consulta en crear_ot: {e}")
-        agregarEnLog(f"### ERROR ###\nError en crear_ot: {e}")
+    except Exception:
+        logger.exception("Error crítico en el proceso 'crear_ot'.")
 
 
 # ============================================================================
-# FUNCIÓN PRINCIPAL: CREAR COMENTARIOS MODO HISTÓRICO
+# FUNCIÓN PRINCIPAL: CREAR COMENTARIOS
 # ============================================================================
 
 def crear_comentarios_historico(session, query, conn_sqlite):
-    """
-    Procesa comentarios en modo HISTÓRICO:
-    - Obtiene todos los comentarios desde Snowflake, los guarda en SQLite y descarga sus imágenes.
-    """
+    """Procesa comentarios en modo HISTÓRICO: guarda en SQLite y descarga imágenes."""
+    cont_nuevos = 0
     cont_imagenes_total = 0
     try:
         os.makedirs("carpeta_imagenes", exist_ok=True)
         cursor = conn_sqlite.cursor()
         crear_tabla_comentarios(cursor)
+
+        logger.info("Ejecutando query de comentarios en Snowflake...")
         comments = session.sql(query)
         rows_comments = comments.collect()
+        logger.info(f"Query ejecutada. {len(rows_comments)} comentarios recibidos de Snowflake.")
         
-        print(f"### MODO HISTORICO: {len(rows_comments)} comentarios recibidos de Snowflake ###")
-        cont_nuevos = 0
-        for row in rows_comments:
+        for i, row in enumerate(rows_comments):
             datos = extraer_datos_comentario(row)
-            if comentario_existe(cursor, datos['comment_id']):
+            comment_id = datos['comment_id']
+            logger.debug(f"Procesando comentario {i+1}/{len(rows_comments)} - ID: {comment_id}")
+
+            if comentario_existe(cursor, comment_id):
+                logger.debug(f"Comentario ID {comment_id} ya existe en SQLite, se omite.")
                 continue
             
             datos_insercion, _ = preparar_datos_insercion(datos)
             try:
                 insertar_comentario(conn_sqlite, cursor, datos_insercion)
-                
                 cont_nuevos += 1
-                cont_imagenes_total += procesar_imagenes_historico(
-                    datos['location_urls'], 
-                    datos['comment_id']
-                )
-            except sqlite3.IntegrityError as e:
-                print(f"Error de integridad al insertar comentario ID={datos['comment_id']}: {e}")
+                cont_imagenes_total += procesar_imagenes_historico(datos['location_urls'], comment_id)
+            except sqlite3.IntegrityError:
+                # Ya logueado en insertar_comentario, no es necesario hacer más.
+                pass
         
-        print(f"Total de comentarios nuevos guardados en esta ejecución: {cont_nuevos}")
-        print(f"Total de imágenes descargadas en esta ejecución: {cont_imagenes_total}")
+        logger.info(f"Total de comentarios nuevos guardados en modo histórico: {cont_nuevos}")
+        logger.info(f"Total de imágenes descargadas en modo histórico: {cont_imagenes_total}")
 
-    except Exception as e:
-        print(f"Error en crear_comentarios_historico: {e}")
-        agregarEnLog(f"### ERROR ###\nError en crear_comentarios_historico: {e}")
+    except Exception:
+        logger.exception("Error crítico en 'crear_comentarios_historico'.")
+
 
 def crear_comentarios_temp(session, query, conn_sqlite):
-    """
-    Procesa comentarios en modo TEMPORAL:
-    - Identifica y guarda nuevos comentarios en SQLite.
-    - Descarga localmente las imágenes de los nuevos comentarios.
-    - Retorna una lista con los datos de los comentarios nuevos.
-    """
-    comentarios_nuevos = []
+    """Procesa comentarios en modo TEMPORAL: guarda nuevos y descarga sus imágenes."""
+    comentarios_nuevos_para_envio = []
     cont_nuevos_guardados = 0
     try:
         os.makedirs("carpeta_imagenes", exist_ok=True)
         cursor = conn_sqlite.cursor()
         crear_tabla_comentarios(cursor)
+
+        logger.info("Ejecutando query de comentarios en Snowflake...")
         comments = session.sql(query)
         rows_comments = comments.collect()
-        print(f"### MODO TEMP: {len(rows_comments)} comentarios recibidos de Snowflake ###")
+        logger.info(f"Query ejecutada. {len(rows_comments)} comentarios recibidos de Snowflake.")
 
         for row in rows_comments:
             datos = extraer_datos_comentario(row)
-            if comentario_existe(cursor, datos['comment_id']):
+            comment_id = datos['comment_id']
+            logger.debug(f"Procesando comentario ID: {comment_id}")
+
+            if comentario_existe(cursor, comment_id):
+                logger.debug(f"Comentario ID {comment_id} ya existe en SQLite, se omite.")
                 continue
             
             datos_insercion, firma = preparar_datos_insercion(datos)
             try:
                 insertar_comentario(conn_sqlite, cursor, datos_insercion)
                 cont_nuevos_guardados += 1
-
-                procesar_imagenes_historico(
-                    datos['location_urls'], 
-                    datos['comment_id']
-                )
+                logger.info(f"Nuevo comentario ID {comment_id} guardado, procesando imágenes...")
+                procesar_imagenes_historico(datos['location_urls'], comment_id)
                 
                 if not ot_existe(cursor, firma):
                     insertar_ot(conn_sqlite, cursor, datos['activity_id'], datos['sap_work_number'])
-                comentarios_nuevos.append({
-                    "ID": datos['comment_id'], 
-                    "ACTIVITY_ID": datos['activity_id'],
-                    "OT": datos['sap_work_number'], 
-                    "ACTIVITY_NAME": datos['activity_name'],
-                    "ROLE_NAME": datos['role_name'],
-                    "WORK_SEQUENCE_NAME": datos['work_sequence_name'], 
-                    "ELEMENT_STEP": datos['element_step'],
-                    "ELEMENT_INSTANCE_NAME": datos['element_instance_name'], 
-                    "SUFFIX": datos['suffix'],
-                    "COMMENT_TITLE": datos['comment_title'], 
-                    "COMMENT_DESCRIPTION": datos['comment_description'],
-                    "LOCATION_URLS": datos['location_urls'], 
-                    "COMMENT_USED_FOR": datos['comment_used_for'],
-                    "CREATED_DATE": datos['created_date'], 
+                
+                # Preparar datos para el JSON que se enviará al endpoint
+                comentarios_nuevos_para_envio.append({
+                    "ID": comment_id, "ACTIVITY_ID": datos['activity_id'],
+                    "OT": datos['sap_work_number'], "ACTIVITY_NAME": datos['activity_name'],
+                    "ROLE_NAME": datos['role_name'], "WORK_SEQUENCE_NAME": datos['work_sequence_name'],
+                    "ELEMENT_STEP": datos['element_step'], "ELEMENT_INSTANCE_NAME": datos['element_instance_name'],
+                    "SUFFIX": datos['suffix'], "COMMENT_TITLE": datos['comment_title'],
+                    "COMMENT_DESCRIPTION": datos['comment_description'], "LOCATION_URLS": datos['location_urls'],
+                    "COMMENT_USED_FOR": datos['comment_used_for'], "CREATED_DATE": datos['created_date'],
                     "MD5": firma
                 })
-            except sqlite3.IntegrityError as e:
-                print(f"Error de integridad al insertar comentario ID={datos['comment_id']}: {e}")
+            except sqlite3.IntegrityError:
+                # Ya logueado en insertar_comentario.
+                pass
         
         if cont_nuevos_guardados > 0:
-            print(f"Total de comentarios nuevos guardados en esta ejecución: {cont_nuevos_guardados}")
+            logger.info(f"Total de comentarios nuevos guardados en modo temp: {cont_nuevos_guardados}")
+        
+        return comentarios_nuevos_para_envio
 
-        return comentarios_nuevos
-    except Exception as e:
-        print(f"Error en crear_comentarios_temp: {e}")
-        agregarEnLog(f"### ERROR ###\nError en crear_comentarios_temp: {e}")
+    except Exception:
+        logger.exception("Error crítico en 'crear_comentarios_temp'.")
         return []
 
+
 def crear_comentarios(session, query, conn_sqlite, parametro):
-    """
-    Función dispatcher que llama al modo correcto según el parámetro.
-    - 'historico': Carga todo y no devuelve nada.
-    - 'temp': Carga solo lo nuevo y devuelve una lista de los nuevos comentarios.
-    """
+    """Función dispatcher que llama al modo correcto según el parámetro."""
+    logger.info(f"Iniciando subproceso: Sincronización de Comentarios en modo '{parametro.upper()}'.")
     if parametro == "historico":
         crear_comentarios_historico(session, query, conn_sqlite)
         return None
     elif parametro == "temp":
         return crear_comentarios_temp(session, query, conn_sqlite)
     else:
-        raise ValueError(f"Parámetro '{parametro}' no reconocido")
+        # Este error no debería ocurrir si se valida en main.py, pero es una salvaguarda.
+        msg = f"Parámetro de modo de creación de comentarios no reconocido: '{parametro}'"
+        logger.error(msg)
+        raise ValueError(msg)
