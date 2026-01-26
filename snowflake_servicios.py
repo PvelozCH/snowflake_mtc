@@ -15,10 +15,6 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-
-ENDPOINT = "http://localhost:8000/recibir-json"
-
-
 # ============================================================================
 # FUNCIONES DE UTILIDAD GENERAL
 # ============================================================================
@@ -156,7 +152,7 @@ def crear_tabla_ot(cursor):
     CREATE TABLE IF NOT EXISTS ot_lista (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ACTIVITY_ID INTEGER,
-        SAP_WORK_NUMBER TEXT,
+        OT TEXT,
         MD5 TEXT UNIQUE
     )
     """)
@@ -165,12 +161,11 @@ def crear_tabla_ot(cursor):
 
 def crear_tabla_comentarios(cursor):
     """Crea la tabla de comentarios si no existe"""
-    # CORREGIDO: Se añade la columna ACTIVITY_NAME en la definición de la tabla.
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS comentarios (
         id INTEGER PRIMARY KEY,
         ACTIVITY_ID INTEGER,
-        SAP_WORK_NUMBER TEXT,
+        OT TEXT,
         ROLE_NAME TEXT,
         WORK_SEQUENCE_NAME TEXT,
         ELEMENT_STEP INTEGER,
@@ -202,7 +197,7 @@ def insertar_ot(conn_sqlite, cursor, activity_id, sap_work_number):
     
     try:
         cursor.execute("""
-            INSERT INTO ot_lista(ACTIVITY_ID, SAP_WORK_NUMBER, MD5) 
+            INSERT INTO ot_lista(ACTIVITY_ID, OT, MD5) 
             VALUES (?,?,?)
         """, (activity_id, sap_work_number, firma))
         conn_sqlite.commit()
@@ -214,10 +209,10 @@ def insertar_ot(conn_sqlite, cursor, activity_id, sap_work_number):
 
 def insertar_comentario(conn_sqlite, cursor, datos_comentario):
     """Inserta un comentario completo en SQLite y guarda el cambio inmediatamente."""
-    # CORREGIDO: Se añade ACTIVITY_NAME a la lista de columnas. El orden ahora es el correcto.
+
     cursor.execute("""
         INSERT INTO comentarios(
-            ID, ACTIVITY_ID, SAP_WORK_NUMBER, ROLE_NAME, WORK_SEQUENCE_NAME,
+            ID, ACTIVITY_ID, OT, ROLE_NAME, WORK_SEQUENCE_NAME,
             ELEMENT_STEP, ELEMENT_INSTANCE_NAME, SUFFIX, COMMENT_TITLE,
             COMMENT_DESCRIPTION, LOCATION_URLS, COMMENT_USED_FOR, CREATED_DATE,
             MD5, ACTIVITY_NAME
@@ -280,7 +275,7 @@ def extraer_datos_comentario(row):
     """
     Extrae los datos de un row de Snowflake y los convierte en un diccionario limpio
     """
-    # CORREGIDO: Se asegura que cada campo del diccionario corresponde a la columna correcta de Snowflake.
+
     return {
         'comment_id': row["ID"],
         'activity_id': row["ACTIVITY_ID"],
@@ -304,11 +299,8 @@ def preparar_datos_insercion(datos):
     Prepara los datos para inserción en SQLite
     Retorna: (tupla_para_insert, firma_md5)
     """
-    # Esta función no se toca, debe seguir generando la firma con el ID.
     firma = generar_md5(datos['activity_id'], datos['sap_work_number'])
     
-    # CORREGIDO: El orden de los valores en esta tupla ahora coincide EXACTAMENTE
-    # con el orden de las columnas en la sentencia INSERT de la función insertar_comentario.
     return (
         datos['comment_id'],
         datos['activity_id'],
@@ -323,8 +315,8 @@ def preparar_datos_insercion(datos):
         datos['location_urls'],
         datos['comment_used_for'],
         datos['created_date'],
-        firma, # El MD5 va en la posición 14
-        datos["activity_name"] # El nuevo campo va en la posición 15
+        firma, 
+        datos["activity_name"] 
     ), firma
 
 def crear_json_temporal(comentarios_nuevos):
@@ -472,12 +464,10 @@ def crear_comentarios_temp(session, query, conn_sqlite):
                 
                 if not ot_existe(cursor, firma):
                     insertar_ot(conn_sqlite, cursor, datos['activity_id'], datos['sap_work_number'])
-                
-                # CORREGIDO: Se añade el nuevo campo activity_name al diccionario para el JSON temporal.
                 comentarios_nuevos.append({
                     "ID": datos['comment_id'], 
                     "ACTIVITY_ID": datos['activity_id'],
-                    "SAP_WORK_NUMBER": datos['sap_work_number'], 
+                    "OT": datos['sap_work_number'], 
                     "ACTIVITY_NAME": datos['activity_name'],
                     "ROLE_NAME": datos['role_name'],
                     "WORK_SEQUENCE_NAME": datos['work_sequence_name'], 

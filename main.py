@@ -17,7 +17,9 @@ CONEXION_SNOWFLAKE = {
 
 # Configuración de archivos y rutas
 DB_SQLITE = "BDD_SNOWFLAKE.db"
-ENDPOINT = "http://localhost:8000/recibir-json"
+ENDPOINT = "https://volcano-soa.metacontrol.cl/api/import/comentarios/historico"
+#ENDPOINT = "http://201.236.128.151:8989/api/import/comentarios/historico"
+ENDPOINT_IMG = "https://volcano-soa.metacontrol.cl/api/import/comentarios/foto"
 JSON_HISTORICO = "2.comentarios_por_ot_historico.json"
 CARPETA_IMAGENES = "carpeta_imagenes"
 
@@ -141,12 +143,12 @@ def modo_temp(session, conn_sqlite):
         return
     
     # Envío por endpoint
-    '''
+    
     try:
         print(f"--- Hay {len(comentarios_a_enviar)} comentarios pendientes para enviar. ---")
         print("--- Iniciando envío al endpoint... ---")
         cargaEndpoint(nombre_json_temp, ENDPOINT)
-        enviar_imagenes_nuevas(comentarios_a_enviar, CARPETA_IMAGENES, ENDPOINT)
+        enviar_imagenes_nuevas(comentarios_a_enviar, CARPETA_IMAGENES, ENDPOINT_IMG)
         
         # Si el envío fuera exitoso, se actualiza el estado.
         print("--- Envío exitoso, actualizando estado en la base de datos. ---")
@@ -156,7 +158,7 @@ def modo_temp(session, conn_sqlite):
 
     except Exception as e:
         print(f"--- ERROR DURANTE EL ENVÍO: {e}. Los comentarios seguirán como 'pendientes'. ---")
-    '''
+    
 
     conn_sqlite.commit()
     print("--- PROCESO TEMPORAL COMPLETADO ---")
@@ -218,7 +220,7 @@ def modo_envio_endpoint(conn_sqlite):
         
         print("--- Iniciando envío al endpoint... ---")
         cargaEndpoint(JSON_HISTORICO, ENDPOINT)
-        enviar_carpeta_imagenes_memoria(CARPETA_IMAGENES, "historico", ENDPOINT)
+        enviar_carpeta_imagenes_memoria(CARPETA_IMAGENES, "historico", ENDPOINT_IMG)
         
         print("--- Envío exitoso, actualizando estado en la base de datos. ---")
         update_status_exitoso(conn_sqlite, todos_los_comentarios)

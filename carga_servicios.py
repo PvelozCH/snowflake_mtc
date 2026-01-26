@@ -7,10 +7,47 @@ import json
 import os
 from datetime import datetime, date
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 import base64
-
+import urllib3
 
 DB_PATH = "BDD_SNOWFLAKE.db"
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+def _crear_sesion_con_reintentos():
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        read=3,
+        connect=3,
+        backoff_factor=0.3,
+        status_forcelist=(500, 502, 503, 504)
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+session = _crear_sesion_con_reintentos()
+
+def agregarEnLog(texto):
+    """Agrega una línea al archivo de log"""
+    with open("Log.txt", "a", encoding="utf-8") as archivo:
+        archivo.write(texto + "\n")
+
+
+def _get_auth_headers():
+
+    headers = {
+        "Content-Type": "application/json"
+    }
+
+    token = os.environ.get("ENDPOINT_BEARER_TOKEN")
+    headers["Authorization"] = f"Bearer gHoVErMX09mm05Rzdzbh1g1gKJn9gFAZafsmUtvSEeXQtOCQfJr3Amow0y3Z"
+    print(f"headers: {headers}")
+    return headers
 
 
 # ============================================================================
@@ -29,20 +66,24 @@ def cargaEndpoint(ruta_json, endpoint):
         with open(ruta_json, "r", encoding="utf-8") as f:
             data = json.load(f)
         
-        response = requests.post(endpoint, json=data, timeout=30)
+        headers = _get_auth_headers()
+        
+        response = session.post(endpoint, json=data, timeout=180, headers=headers, verify=False)
         response.raise_for_status()
         
         print(f"Envío de archivo JSON exitoso: {ruta_json}")
     
     except Exception as e:
         print(f"Error enviando JSON: {e}")
+        agregarEnLog(f"### ERROR EN ENDPOINT (JSON) ###\n{e}")
+        raise e
 
 
-def enviar_imagen_json_memoria(ruta_imagen, tipo, endpoint, timeout=60):
+def enviar_imagen_json_memoria(ruta_imagen, tipo, endpoint, timeout=360):
     """
     Convierte una imagen a Base64 y la envía como JSON al endpoint
     Usado en modo temp para enviar imágenes inmediatamente
-    Retorna True si tuvo éxito, False si falló
+    Levanta una excepción si falla.
     """
     try:
         with open(ruta_imagen, "rb") as f:
@@ -59,14 +100,16 @@ def enviar_imagen_json_memoria(ruta_imagen, tipo, endpoint, timeout=60):
             "tipo": tipo,
             "imagen_b64": imagen_b64
         }
-        
-        response = requests.post(endpoint, json=payload, timeout=timeout)
+
+
+        headers = _get_auth_headers()
+        response = session.post(endpoint, json=payload, timeout=timeout,headers=headers,verify=False)
         response.raise_for_status()
-        return True
     
     except Exception as e:
         print(f"Error enviando imagen: {e}")
-        return False
+        agregarEnLog(f"### ERROR EN ENDPOINT (IMAGEN) ###\n{e}")
+        raise e
 
 
 def enviar_carpeta_imagenes_memoria(carpeta_imagenes, tipo, endpoint):
@@ -83,17 +126,14 @@ def enviar_carpeta_imagenes_memoria(carpeta_imagenes, tipo, endpoint):
         if not os.path.isfile(ruta):
             continue
         
-        try:
-            enviar_imagen_json_memoria(
-                ruta_imagen=ruta,
-                tipo=tipo,
-                endpoint=endpoint
-            )
-            print(f"Imagen enviada: {nombre}")
+        enviar_imagen_json_memoria(
+            ruta_imagen=ruta,
+            tipo=tipo,
+            endpoint=endpoint
+        )
+        print(f"Imagen enviada: {nombre}")
         
-        except Exception as e:
-            print(f"Error enviando {nombre}: {e}")
-
+        
 
 # ============================================================================
 # FUNCIONES DE SERIALIZACIÓN
