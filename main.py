@@ -5,6 +5,7 @@ from snowflake.snowpark import Session
 
 from snowflake_servicios import crear_ot, crear_comentarios, crear_json_temporal, get_pending_comentarios, get_pending_comentario_ids, update_status_exitoso
 from carga_servicios import jsonHistorico, cargaEndpoint, enviar_carpeta_imagenes_memoria, enviar_imagen_json_memoria
+from logger_config import logger, start_run_log
 
 CONEXION_SNOWFLAKE = {
     "WAREHOUSE": "DEFAULT_WAREHOUSE",
