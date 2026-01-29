@@ -99,37 +99,56 @@ def modo_historico(session, conn_sqlite):
     logger.info("--- PROCESO HISTÓRICO COMPLETADO ---")
 
 
-def procesar_comentario_individual(comentario, conn_sqlite):
+def modo_temp(session, conn_sqlite):
     """
-    Procesa y envía un único comentario y sus imágenes. Actualiza el estado si todo es exitoso.
+    Sincroniza con Snowflake, envía todos los comentarios pendientes en un solo JSON,
+    y luego procesa las imágenes individualmente, actualizando el estado de inmediato.
     """
-    comentario_id = comentario.get('ID')
+    logger.info("--- INICIANDO MODO TEMPORAL (CON ESTADO) ---")
+    
+    # 1. Sincronizar datos nuevos desde Snowflake
+    crear_ot(session, QUERY_OT, conn_sqlite)
+    crear_comentarios(session, QUERY_COMENTARIOS, conn_sqlite, "temp")
+    
+    # 2. Obtener todos los comentarios pendientes
+    comentarios_pendientes = get_pending_comentarios(conn_sqlite)
+    
+    if not comentarios_pendientes:
+        logger.info("--- PROCESO TEMPORAL COMPLETADO: No hay comentarios pendientes para enviar. ---")
+        return
+
+    logger.info(f"Se encontraron {len(comentarios_pendientes)} comentarios pendientes para procesar.")
     nombre_json_temp = None
     try:
-        logger.info(f"Procesando comentario ID {comentario_id}...")
-        comentario_individual = [comentario]
-        nombre_json_temp = crear_json_temporal(comentario_individual)
-        
+        # 3. Enviar los datos de todos los comentarios pendientes en un solo lote
+        nombre_json_temp = crear_json_temporal(comentarios_pendientes)
         if not nombre_json_temp:
-            logger.error(f"No se pudo generar el archivo JSON temporal para comentario ID {comentario_id}. El comentario seguirá como 'pendiente'.")
+            logger.error("No se pudo generar el archivo JSON temporal para los comentarios pendientes. Abortando.")
             return
 
-        # 1. Enviar datos del comentario
+        logger.info(f"Enviando lote de {len(comentarios_pendientes)} comentarios pendientes desde '{nombre_json_temp}'...")
         cargaEndpoint(nombre_json_temp, ENDPOINT)
-        logger.info(f"Datos del comentario ID {comentario_id} enviados exitosamente.")
+        logger.info("Lote de comentarios pendientes JSON enviado exitosamente.")
 
-        # 2. Enviar imágenes asociadas
-        imagenes_ok = enviar_imagenes_de_comentario(comentario_id, CARPETA_IMAGENES, "temp", ENDPOINT_IMG)
-        
-        # 3. Actualizar estado solo si todo fue exitoso
-        if imagenes_ok:
-            update_comment_status(conn_sqlite, comentario_id, "exitoso")
-            logger.info(f"Comentario ID {comentario_id} y sus imágenes procesados con éxito. Estado actualizado a 'exitoso'.")
-        else:
-            logger.warning(f"No todas las imágenes para el comentario ID {comentario_id} se enviaron correctamente. El estado permanecerá como 'pendiente'.")
+        # 4. Procesar imágenes y estados individualmente para cada comentario del lote
+        logger.info(f"Procesando imágenes para los {len(comentarios_pendientes)} comentarios enviados...")
+        for comentario in comentarios_pendientes:
+            comentario_id = comentario.get('ID')
+            try:
+                logger.info(f"Procesando imágenes para comentario ID {comentario_id}...")
+                imagenes_ok = enviar_imagenes_de_comentario(comentario_id, CARPETA_IMAGENES, "temp", ENDPOINT_IMG)
+                
+                if imagenes_ok:
+                    update_comment_status(conn_sqlite, comentario_id, "exitoso")
+                    logger.info(f"Imágenes para comentario ID {comentario_id} enviadas. Estado actualizado a 'exitoso'.")
+                else:
+                    logger.warning(f"Fallo en envío de imágenes para comentario ID {comentario_id}. El estado permanecerá como 'pendiente'.")
+            
+            except Exception as e:
+                logger.exception(f"Error inesperado procesando imágenes para el comentario ID {comentario_id}. El comentario seguirá como 'pendiente'.")
 
     except Exception:
-        logger.exception(f"Error durante el envío del comentario ID {comentario_id} o sus imágenes. El comentario seguirá como 'pendiente'.")
+        logger.exception("ERROR CRÍTICO DURANTE EL ENVÍO DEL LOTE JSON de pendientes. No se procesarán imágenes ni se actualizarán estados.")
     
     finally:
         if nombre_json_temp and os.path.exists(nombre_json_temp):
@@ -139,26 +158,6 @@ def procesar_comentario_individual(comentario, conn_sqlite):
             except OSError as e:
                 logger.error(f"No se pudo eliminar el archivo JSON temporal '{nombre_json_temp}': {e}")
 
-
-def modo_temp(session, conn_sqlite):
-    """
-    Modo de carga incremental con estado. El procesamiento es atómico por comentario.
-    """
-    logger.info("--- INICIANDO MODO TEMPORAL (CON ESTADO) ---")
-    crear_ot(session, QUERY_OT, conn_sqlite)
-    crear_comentarios(session, QUERY_COMENTARIOS, conn_sqlite, "temp")
-    
-    comentarios_a_enviar = get_pending_comentarios(conn_sqlite)
-    
-    if not comentarios_a_enviar:
-        logger.info("--- PROCESO TEMPORAL COMPLETADO: No hay comentarios pendientes para enviar. ---")
-        return
-
-    logger.info(f"Se encontraron {len(comentarios_a_enviar)} comentarios pendientes para procesar.")
-
-    for comentario in comentarios_a_enviar:
-        procesar_comentario_individual(comentario, conn_sqlite)
-    
     logger.info("--- PROCESO TEMPORAL COMPLETADO ---")
 
 
@@ -175,22 +174,57 @@ def modo_json_historico(conn_sqlite):
 
 def modo_envio_endpoint(conn_sqlite):
     """
-    Envía datos pendientes existentes al endpoint uno por uno y actualiza el estado.
+    Envía todos los comentarios en un solo JSON y luego procesa las imágenes
+    individualmente, actualizando el estado de cada comentario pendiente de inmediato.
     """
-    logger.info("--- INICIANDO MODO ENVÍO A ENDPOINT (UNO POR UNO) ---")
-    
-    comentarios_a_enviar = get_pending_comentarios(conn_sqlite)
-    
-    if not comentarios_a_enviar:
-        logger.info("No hay comentarios pendientes en la base de datos para enviar.")
-        return
+    logger.info("--- INICIANDO MODO ENVÍO A ENDPOINT (LOTE JSON, INDIVIDUAL IMÁGENES) ---")
 
-    logger.info(f"Iniciando envío de {len(comentarios_a_enviar)} comentarios pendientes al endpoint...")
-    
-    for comentario in comentarios_a_enviar:
-        procesar_comentario_individual(comentario, conn_sqlite)
+    try:
+        # 1. Generar y enviar el lote completo de TODOS los comentarios
+        jsonHistorico()
+        
+        # Se obtiene la lista de todos los comentarios para el log, pero solo se procesarán los pendientes.
+        cursor = conn_sqlite.cursor()
+        cursor.execute("SELECT COUNT(*) FROM comentarios")
+        total_comentarios = cursor.fetchone()[0]
+        
+        if total_comentarios == 0:
+            logger.info("No hay comentarios en la base de datos para enviar. Proceso finalizado.")
+            return
 
-    logger.info("--- PROCESO DE ENVÍO A ENDPOINT COMPLETADO ---")
+        logger.info(f"Enviando lote completo de {total_comentarios} comentarios desde '{JSON_HISTORICO}'...")
+        cargaEndpoint(JSON_HISTORICO, ENDPOINT)
+        logger.info("Lote de comentarios JSON enviado exitosamente.")
+
+        # 2. Procesar imágenes y estados individualmente para los comentarios PENDIENTES
+        comentarios_pendientes = get_pending_comentarios(conn_sqlite)
+        
+        if not comentarios_pendientes:
+            logger.info("No hay comentarios pendientes para procesar imágenes. Proceso finalizado.")
+            return
+
+        logger.info(f"Procesando imágenes para {len(comentarios_pendientes)} comentarios pendientes...")
+        for comentario in comentarios_pendientes:
+            comentario_id = comentario.get('ID')
+            
+            try:
+                logger.info(f"Procesando imágenes para comentario ID {comentario_id}...")
+                imagenes_ok = enviar_imagenes_de_comentario(comentario_id, CARPETA_IMAGENES, "historico", ENDPOINT_IMG)
+                
+                if imagenes_ok:
+                    update_comment_status(conn_sqlite, comentario_id, "exitoso")
+                    logger.info(f"Imágenes para comentario ID {comentario_id} enviadas. Estado actualizado a 'exitoso'.")
+                else:
+                    logger.warning(f"Fallo en envío de imágenes para comentario ID {comentario_id}. El estado permanecerá como 'pendiente'.")
+            
+            except Exception as e:
+                logger.exception(f"Error inesperado procesando imágenes para el comentario ID {comentario_id}. El comentario seguirá como 'pendiente'.")
+
+    except Exception:
+        logger.exception("ERROR CRÍTICO DURANTE EL ENVÍO DEL LOTE JSON. No se procesarán imágenes ni se actualizarán estados.")
+    
+    finally:
+        logger.info("--- PROCESO DE ENVÍO A ENDPOINT COMPLETADO ---")
 
 
 def modo_solo_fotos(conn_sqlite):
