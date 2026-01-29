@@ -281,30 +281,26 @@ def get_pending_comentario_ids(conn_sqlite):
         logger.exception("Error al obtener IDs de comentarios pendientes de SQLite.")
         return []
 
-def update_status_exitoso(conn_sqlite, comentarios):
-    """Actualiza el estado de una lista de comentarios a 'exitoso'."""
-    if not comentarios:
-        return
-    
-    # Se asegura de obtener el ID independientemente de si la clave es 'ID' o 'id'.
-    comment_ids = [c.get('ID', c.get('id')) for c in comentarios]
-    comment_ids = [cid for cid in comment_ids if cid is not None]
-
-    if not comment_ids:
-        logger.warning("No se encontraron IDs de comentarios válidos para actualizar el estado.")
+def update_comment_status(conn_sqlite, comment_id, status):
+    """Actualiza el estado de un único comentario en la base de datos."""
+    if not comment_id:
+        logger.warning("Se intentó actualizar el estado de un comentario sin ID.")
         return
 
-    logger.info(f"Actualizando estado a 'exitoso' para {len(comment_ids)} comentarios...")
-    
+    logger.info(f"Actualizando estado a '{status}' para el comentario ID: {comment_id}...")
     try:
         cursor = conn_sqlite.cursor()
-        placeholders = ','.join('?' for _ in comment_ids)
-        # La columna en la BDD es 'id' en minúsculas.
-        query = f"UPDATE comentarios SET status = 'exitoso' WHERE id IN ({placeholders})"
-        cursor.execute(query, comment_ids)
-        logger.info(f"{cursor.rowcount} filas de comentarios actualizadas a 'exitoso' en la base de datos.")
+        cursor.execute("UPDATE comentarios SET status = ? WHERE id = ?", (status, comment_id))
+        conn_sqlite.commit()
+        
+        if cursor.rowcount == 0:
+            logger.warning(f"No se encontró el comentario con ID {comment_id} para actualizar. No se realizaron cambios.")
+        else:
+            logger.info(f"{cursor.rowcount} fila(s) de comentario actualizada(s) a '{status}' en la base de datos.")
+            
     except Exception:
-        logger.exception(f"Error al actualizar el estado para los IDs de comentario: {comment_ids}")
+        logger.exception(f"Error al actualizar el estado para el ID de comentario: {comment_id}")
+        conn_sqlite.rollback()
 
 
 # ============================================================================

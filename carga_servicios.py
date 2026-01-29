@@ -129,13 +129,60 @@ def enviar_carpeta_imagenes_memoria(carpeta_imagenes, tipo, endpoint):
             logger.warning(f"Se encontró un elemento que no es un archivo y será omitido: {ruta}")
             continue
         
-        # La función enviar_imagen_json_memoria ya loguea su propio progreso y errores.
+
         enviar_imagen_json_memoria(
             ruta_imagen=ruta,
             tipo=tipo,
             endpoint=endpoint
         )
     logger.info(f"Proceso de envío de imágenes desde la carpeta '{carpeta_imagenes}' finalizado.")
+
+
+def enviar_imagenes_de_comentario(comment_id, carpeta_imagenes, tipo, endpoint):
+    """
+    Busca y envía todas las imágenes asociadas a un comment_id.
+    Retorna True si todas las imágenes se envían con éxito o si no hay imágenes.
+    Retorna False si falla el envío de alguna imagen.
+    """
+    logger.info(f"Buscando imágenes para el comentario ID {comment_id} en '{carpeta_imagenes}'...")
+    
+    if not os.path.isdir(carpeta_imagenes):
+        logger.error(f"La carpeta de imágenes '{carpeta_imagenes}' no existe. No se pueden enviar imágenes.")
+        return True # Si la carpeta no existe, no hay imágenes que enviar, se considera éxito para no bloquear el comentario.
+
+    try:
+        # Convert comment_id to string to be safe
+        comment_id_str = str(comment_id)
+        imagenes_a_enviar = [
+            os.path.join(carpeta_imagenes, f)
+            for f in sorted(os.listdir(carpeta_imagenes))
+            if f.startswith(f"{comment_id_str}_") and os.path.isfile(os.path.join(carpeta_imagenes, f))
+        ]
+    except Exception as e:
+        logger.exception(f"Error al buscar imágenes para el comment_id {comment_id} en {carpeta_imagenes}")
+        return False
+
+
+    if not imagenes_a_enviar:
+        logger.info(f"No se encontraron imágenes para el comentario ID {comment_id}.")
+        return True
+
+    logger.info(f"Se encontraron {len(imagenes_a_enviar)} imágenes para el comentario ID {comment_id}. Iniciando envío...")
+    
+    for i, ruta_imagen in enumerate(imagenes_a_enviar):
+        try:
+            logger.info(f"Enviando imagen {i + 1}/{len(imagenes_a_enviar)}: {os.path.basename(ruta_imagen)}")
+            enviar_imagen_json_memoria(
+                ruta_imagen=ruta_imagen,
+                tipo=tipo,
+                endpoint=endpoint
+            )
+        except Exception:
+            logger.error(f"Fallo al enviar la imagen {os.path.basename(ruta_imagen)} para el comentario ID {comment_id}. Se cancela el resto de envíos para este comentario.")
+            return False
+    
+    logger.info(f"Todas las {len(imagenes_a_enviar)} imágenes para el comentario ID {comment_id} fueron enviadas exitosamente.")
+    return True
 
 
 # ============================================================================
